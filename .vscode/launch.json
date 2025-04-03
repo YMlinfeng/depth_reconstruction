@@ -1,0 +1,37 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "mzjdebug",
+            "type": "python",
+            "request": "attach",
+            "connect": {
+                // "host": "localhost",
+                "host": "127.0.0.1",
+                "port": 5679,
+            },
+        }
+    ]
+}
+
+
+// {
+//     // 使用 IntelliSense 了解相关属性。
+//     // 悬停以查看现有属性的描述。
+//     // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+//     "version": "0.2.0",
+//     "configurations": [
+//         {
+//             "name": "Py: p.py",     //调试列表里显示的名字，随意，建议写当前调试的文件名
+//             "type": "python",               // 语言类型， 默认就可以
+//             "request": "launch",            // 应答类型， 默认就可以
+//             "program": "${file}",           // 变量，自动取当前光标所在的文件
+//             "console": "integratedTerminal",    // 显示控制台，默认用 VScode 自带的，也可以用系统的。
+//             "justMyCode": true,             // true 只调试当前 py 文件，默认值; false 也调试引用的模块
+//             "args": ["-a","abc/", "-c", "dd"]   // 执行脚本的附加参数，默认生成是没有的
+//         }
+//     ]
+// }

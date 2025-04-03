@@ -1,6 +1,8 @@
 temp
 wandb
 output
+output_dir
+checkpoints
 data
 3rd
 visual_dir
@@ -18,3 +20,4 @@ __pycache__
 *.h5
 *.hdf5
 *.so
+*.pth
