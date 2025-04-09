@@ -19,7 +19,7 @@ from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from vqvae.vae_2d_resnet import VAERes2DImg, VAERes2DImgDirectBC
 from vqvae.vae_2d_resnet import VectorQuantizer
-from vqganlc.models.models_vq import VQModel
+# from vqganlc.models.models_vq import VQModel
 from training.pretrain_dataset import  MyDatasetOnlyforVoxel
 from training.train_arg_parser import get_args_parser
 from model import LSSTPVDAv2OnlyForVoxel

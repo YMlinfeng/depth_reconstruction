@@ -3,9 +3,9 @@ import torch.nn.functional as F
 import importlib
 from einops import rearrange
 from torch.nn import Embedding
-from models.discriminator import NLayerDiscriminator, weights_init
-from models.lpips import LPIPS
-from models.encoder_decoder import Encoder, Decoder, Decoder_Cross
+from vqganlc.models.discriminator import NLayerDiscriminator, weights_init
+from vqganlc.models.lpips import LPIPS
+from vqganlc.models.encoder_decoder import Encoder, Decoder, Decoder_Cross
 
     
 def get_obj_from_str(string, reload=False):

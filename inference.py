@@ -30,7 +30,7 @@ def main():
     # debugpy.wait_for_client()
     
     # 保存路径
-    visual_dir = './output/d402/t3'
+    visual_dir = './output/d408/t1'
     os.makedirs(visual_dir, exist_ok=True)
 
     # 加载信息 JSON Lines，一种每行都是一个 JSON 对象的格式
@@ -206,23 +206,19 @@ def main():
     )['state_dict']
     model.load_state_dict(state_dict, strict=False)
 
-    # 加载包含 vqvae 权重的文件
     loaded = torch.load(
-        '/mnt/bn/occupancy3d/workspace/lzy/Occ3d/work_dirs/pretrainv0.7_2dvqvaelargefewfewchannels/epoch_1.pth',
+        # '/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/checkpoints/vqvae_epoch1_step12500.pth',
+        "/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/checkpoints_vqgan_1024_4/vqvae_epoch1_step1000.pth",
         map_location='cpu'
-    )['state_dict']
-    vqvae_state = {k: v for k, v in loaded.items() if "vqvae" in k}
-    print(len(vqvae_state))
-
-    # loaded = torch.load(
-    #     '/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/checkpoints/vqvae_epoch1_step12500.pth',
-    #     map_location='cpu'
-    # )['vqvae_state_dict']
-    # vqvae_state = {k: v for k, v in loaded.items()}
-    # print(len(vqvae_state)) # 1565
+    )['vqvae_state_dict']
+    vqvae_state = {k.replace('module.', ''): v for k, v in loaded.items()}
+    print(len(vqvae_state)) # 1565
 
     # 再次加载，只加载筛选后的部分，这些键如果在模型中已有对应项，则会覆盖原来的值
-    model.load_state_dict(vqvae_state, strict=False)
+    # model.load_state_dict(vqvae_state, strict=False)
+    # print(model.load_state_dict(vqvae_state, strict=False))
+    # self.vqvae = VAERes2DImgDirectBC(inp_channels=80, out_channels=80, z_channels=256, mid_channels=1024) #!!!
+    model.pts_bbox_head.vqvae.load_state_dict(vqvae_state, strict=False)
     
     
     # # batch_size = 2

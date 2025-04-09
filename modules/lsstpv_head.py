@@ -501,6 +501,7 @@ from modules.image2bev.ViewTransformerLSSVoxel import (
 from modules.render import RaySampler
 from modules.render.render_utils import nerf_models
 from modules.render.render_utils.rays import RayBundle
+from vqvae.vae_2d_resnet import VAERes2DImg, VAERes2DImgDirectBC
 
 
 def constant_init(module, val, bias=0):
@@ -637,7 +638,7 @@ class LSSTPVHead(nn.Module):
         
         self.num_imgs = num_imgs
         self._init_layers()
-        self.vqvae = VAERes2DImg(inp_channels=80, out_channels=80, z_channels=4, mid_channels=320) #!!!
+        self.vqvae = VAERes2DImgDirectBC(inp_channels=80, out_channels=80, z_channels=4, mid_channels=1024) #!!!
 
 
     def _init_layers(
@@ -775,7 +776,7 @@ class LSSTPVHead(nn.Module):
 
         # todo 用vqgan对sdf 进行压缩（编码），压缩后不要进行任何操作，马上解压缩（解码），恢复原来的形状
         
-        # --------------------------------------------------------------------
+        # todo --------------------------------------------------------------------
         #
         # 说明：
         # 1. sdf_preds[-1] 的形状为 (B, 4, 60, 100, 20)，重排后通道数为 4*20 = 80，
@@ -786,16 +787,11 @@ class LSSTPVHead(nn.Module):
         compressed_feature = vqvae_out['mid']     # 取出中间的压缩结果
         reconstructed_sdf = vqvae_out['logits']  # 获取解码后的重构结果，其形状为 (B, 4, 60, 100, 20)
         # 使用重构后的 sdf 替换原来的 sdf_preds[-1]，便于后续渲染流程观察重建效果
+        recon_loss = F.mse_loss(reconstructed_sdf, sdf_preds[0])  # 与输入 voxel 做 MSE
+        print(recon_loss)
         sdf_preds[-1] = reconstructed_sdf
 
-        
-        # 返回最终的 SDF 预测、解码器最后的输出特征以及渲染得到的深度图
-        # import pdb; pdb.set_trace()
-        # return sdf_preds[-1]
-        # forward 函数总体目的：从多视角图像输入中提取特征，构造 3D 体素表示，
-        # 融合不同平面的特征，并解码出占据（或距离）预测，同时基于射线采样与神经渲染获得深度图，
-        # 最终为后续任务（如三维重建或检测）提供预测结果。
-
+    
 
         lidar2img, lidar2cam = [], []
         for img_meta in img_metas:

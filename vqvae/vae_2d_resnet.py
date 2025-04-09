@@ -1099,8 +1099,6 @@ class VAERes2DImgDirectBC(nn.Module):
     # 目的：推理模式下直接从给定的 z 生成对应的图像输出
 
 
-
-
 if __name__ == "__main__":
     vae = VAERes3DVoxel().cuda()
     inp = torch.rand(2, 4, 60, 100, 20).cuda()
