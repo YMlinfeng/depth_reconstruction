@@ -22,10 +22,11 @@ pip install thop
 pip install connected-components-3d
 
 ./TORCHRUN train.py \
---validate_path='./output/vqgan_320_4' \
+--validate_path='./output/vqganlc_16384_4' \
 --batch_size=16 \
---epochs=2 \
+--epochs=20 \
 --lr=1e-4 \
 --num_workers=8 \
 --mid_channels=320 \
---checkpoint_dir="./checkpoints_vqgan_320_4"
+--checkpoint_dir="./checkpoints_vqganlc_16384_4" \
+--model="VQModel" \

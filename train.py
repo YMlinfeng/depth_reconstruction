@@ -22,7 +22,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 # ===== 自定义模块 =====
 from vqvae.vae_2d_resnet import VAERes2DImg, VAERes2DImgDirectBC, VectorQuantizer
-from vqganlc.models.models_vq import VQModel
+from vqganlc.models.vqgan_lc import VQModel
 from training.pretrain_dataset import MyDatasetOnlyforVoxel
 from training.train_arg_parser import get_args_parser
 from model import LSSTPVDAv2OnlyForVoxel, LSSTPVDAv2
@@ -104,7 +104,7 @@ def validate_vqvae(args, vqvae, val_loader, model, device, epoch, step):
         for imgs, img_metas in val_loader:
             imgs = imgs.to(device)
             # 通过已训练好的推理模型获得 voxel 信息
-            result3 = model(imgs, img_metas)  # 例如: [B, 4, 60, 100, 20]
+            result3 = model(imgs, img_metas)  # ([B, 4, 60, 100, 20],[],[])
             # 取第一个输出作为 voxel
             result = result3[0]
             # VQ-VAE前向传播
@@ -210,7 +210,7 @@ def train_vqvae(args, model, vqvae, train_loader, val_loader, device):
             # =====================
             # import pdb; pdb.set_trace()
             voxel = voxel3[0]
-            vqvae_out = vqvae(voxel)   # 包含 'logits', 'embed_loss', 'mid'
+            vqvae_out = vqvae(voxel, args)   # 包含 'logits', 'embed_loss', 'mid'
             reconstructed_sdf = vqvae_out['logits']  # 重构结果 [B,4,60,100,20]
             embed_loss = vqvae_out['embed_loss']     # 量化损失(标量)
             
@@ -291,6 +291,7 @@ def main():
                         default="nccl",
                         help="分布式后端（推荐使用 'nccl'）.")
     # ==============================
+    parser.add_argument("--model", type=str, default="VQModel", help="choices: VAERes2DImgDirectBC, VQModel")
     # 这里是一些与训练VQ-VAE相关的参数,可随意添加
     # ==============================
     parser.add_argument("--dataset", type=str, default="MyDatasetOnlyforVoxel", help="Dataset name for logging")
@@ -316,7 +317,13 @@ def main():
     parser.add_argument("--mid_channels", type=int, default=320, help="隐藏层通道数") # 1024
     parser.add_argument("--z_channels", type=int, default=4, help="潜变量通道数") # 256
     parser.add_argument("--img_shape", type=lambda s: tuple(map(int, s.split(','))), default="80,60,100,1", help="图像数据形状")
-    
+    # vqganlc
+    parser.add_argument("--encoder_type", type=str, default="vqgan", help="Encoder类型") # 可选vqgan or vqgan_lc   
+    parser.add_argument("--tuning_codebook", type=int, default=-1, help="Frozen or Tuning Coebook")
+    parser.add_argument("--use_cblinear", type=int, default=2, help="Using Projector") # 1是Linear，2是MLP
+    parser.add_argument("--quantizer_type", type=str, default="default", help="Quantizer类型") # 非 EMA 情况
+    # parser.add_argument("--local_embedding_path", default="cluster_codebook_1000cls_100000.pth")
+    parser.add_argument("--n_vision_words", type=int, default=16384, help="Codebook Size?")
 
     args = parser.parse_args()
 
@@ -398,18 +405,31 @@ def main():
     # =======================
     # 3) 构造 VQ-VAE (训练模型)
     # =======================
-    # 注意：已经有 VAERes2DImg 的定义，这里只需要实例化即可
+    # 注意：已经有定义，这里只需要实例化即可
     vqvae_cfg = None  # 如果有额外vqvae的配置，可在此传
-    # vqvae = VAERes2DImg(
-    vqvae = VAERes2DImgDirectBC(
-        inp_channels=args.inp_channels,
-        out_channels=args.out_channels,
-        mid_channels=args.mid_channels,
-        z_channels=args.z_channels,
-        vqvae_cfg=vqvae_cfg
-    )
-    vqvae.to(device)
 
+    if args.model == "VAERes2DImgDirectBC":
+        vqvae = VAERes2DImgDirectBC(
+            inp_channels=args.inp_channels,
+            out_channels=args.out_channels,
+            mid_channels=args.mid_channels,
+            z_channels=args.z_channels,
+            vqvae_cfg=vqvae_cfg
+        )
+    elif args.model == "VQModel":
+        vqvae = VQModel(
+            args=args,
+            inp_channels=args.inp_channels,
+            out_channels=args.out_channels,
+            mid_channels=args.mid_channels,
+            z_channels=args.z_channels,
+            vqvae_cfg=vqvae_cfg
+        )
+    else:
+        raise ValueError("未识别的模型类型: " + args.model)
+    
+    vqvae.to(device)
+    print("训练的模型类型为:", args.model)
     # -------------------------------------------------------------------
     # 以下为多机多卡支持：若world_size>1，就用DDP封装 model 和 vqvae
     # 注意：LSSTPVDAv2OnlyForVoxel 只推理，不训练；若仍想让其多卡并行以分摊显存，也可DDP
@@ -451,6 +471,5 @@ if __name__ == "__main__":
     # # 等待调试器连接（可选）
     # print("等待调试器连接...") #按F5
     # debugpy.wait_for_client()
-
 
     main()

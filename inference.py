@@ -30,7 +30,7 @@ def main():
     # debugpy.wait_for_client()
     
     # 保存路径
-    visual_dir = './output/d408/t1'
+    visual_dir = './output/d408/t2'
     os.makedirs(visual_dir, exist_ok=True)
 
     # 加载信息 JSON Lines，一种每行都是一个 JSON 对象的格式
@@ -207,8 +207,8 @@ def main():
     model.load_state_dict(state_dict, strict=False)
 
     loaded = torch.load(
-        # '/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/checkpoints/vqvae_epoch1_step12500.pth',
-        "/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/checkpoints_vqgan_1024_4/vqvae_epoch1_step1000.pth",
+        "/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/checkpoints_vqgan_320_4/vqvae_epoch1_step8000.pth",
+        # "/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/checkpoints_vqgan_1024_4/vqvae_epoch1_step18000.pth",
         map_location='cpu'
     )['vqvae_state_dict']
     vqvae_state = {k.replace('module.', ''): v for k, v in loaded.items()}

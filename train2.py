@@ -1,45 +1,34 @@
-# 4.1 new version
-import os
-import torch
-import torch.nn.functional as F
-import argparse
-from pathlib import Path
-from torch.utils.data import DataLoader
-from torch import nn
-import argparse
+# ===== 标准库 =====
 import os
 import math
-import torch
 import logging
+import argparse
+import pickle
+from pathlib import Path
+
+# ===== 第三方库 =====
+import numpy as np
+import cv2
+import matplotlib.pyplot as plt
+
+# ===== PyTorch =====
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import torch.distributed as dist
-from pathlib import Path
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
-from vqvae.vae_2d_resnet import VAERes2DImg, VAERes2DImgDirectBC
-from vqvae.vae_2d_resnet import VectorQuantizer
-# from vqganlc.models.models_vq import VQModel
-from training.pretrain_dataset import  MyDatasetOnlyforVoxel
+
+# ===== 自定义模块 =====
+from vqvae.vae_2d_resnet import VAERes2DImg, VAERes2DImgDirectBC, VectorQuantizer
+from vqganlc.models.models_vq import VQModel
+from training.pretrain_dataset import MyDatasetOnlyforVoxel
 from training.train_arg_parser import get_args_parser
-from model import LSSTPVDAv2OnlyForVoxel
+from model import LSSTPVDAv2OnlyForVoxel, LSSTPVDAv2
 from vismask.gen_vis_mask import sdf2occ
 from training import distributed_mode
-import matplotlib.pyplot as plt
-import cv2
-import argparse
-import os
-import math
-import torch
-import logging
-from training.train_arg_parser import get_args_parser
-from model import LSSTPVDAv2OnlyForVoxel
-from vismask.gen_vis_mask import sdf2occ
-from training import distributed_mode
-import matplotlib.pyplot as plt
-from model import LSSTPVDAv2
-import pickle
-import numpy as np
+from training.schedulers import WarmupCosineLRScheduler, SchedulerFactory
 
 
 logger = logging.getLogger(__name__)
@@ -95,12 +84,6 @@ def load_checkpoint(ckpt_path, vqvae, optimizer, lr_scheduler):
 # validate_vqvae: 这里定义一个简单的验证过程，对一小部分batch进行推理，
 # 统计重构损失和embed_loss，帮助监控模型收敛情况。
 # ==============================
-import os
-import torch
-import torch.nn.functional as F
-import numpy as np
-import matplotlib.pyplot as plt
-
 def validate_vqvae(args, vqvae, val_loader, model, device, epoch, step):
     """
       1. 每次验证时，会创建一个新的子目录，目录名称包含当前 epoch 和 step 信息
@@ -111,7 +94,7 @@ def validate_vqvae(args, vqvae, val_loader, model, device, epoch, step):
     total_steps = 0
 
     # 构造保存验证结果的文件夹，子目录名称包含 epoch 和 step 信息
-    visual_dir = os.path.join('./output/d403', f'epoch_{epoch}_step_{step}')
+    visual_dir = os.path.join(args.validate_path, f'epoch_{epoch}_step_{step}')
     os.makedirs(visual_dir, exist_ok=True)
 
     # 用于存储每个batch的日志信息
@@ -177,8 +160,22 @@ def validate_vqvae(args, vqvae, val_loader, model, device, epoch, step):
 def train_vqvae(args, model, vqvae, train_loader, val_loader, device):
     # optimizer = torch.optim.Adam(vqvae.parameters(), lr=args.lr, betas=(0.9, 0.999))
     optimizer = torch.optim.AdamW(vqvae.parameters(), lr=args.lr, betas=(0.9, 0.999))
-    # 如果需要学习率调度，可以创建
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5) if args.use_scheduler else None
+    # # 如果需要学习率调度，可以创建
+
+    total_steps = len(train_loader) * args.epochs
+    warmup_steps = int(0.05 * total_steps)  # 5% warmup
+
+    if args.use_scheduler:
+        factory = SchedulerFactory(
+            optimizer=optimizer,
+            total_steps=total_steps,
+            warmup_steps=warmup_steps,
+            base_lr=args.lr,
+            min_lr=1e-6
+        )
+        lr_scheduler = factory.get(name="cosine")  # 返回 SchedulerWrapper
+    else:
+        lr_scheduler = None
 
     # 尝试加载 checkpoint（若 args.resume 为 True，且在 args.resume_ckpt 中指定了 ckpt 文件路径）
     start_epoch = 1
@@ -228,11 +225,13 @@ def train_vqvae(args, model, vqvae, train_loader, val_loader, device):
             optimizer.step()
             if lr_scheduler:
                 lr_scheduler.step()
-
+                current_lr = lr_scheduler.get_lr()
+                
             # 打印或记录训练日志
             if step % args.log_interval == 0:
                 print(f"[Epoch {epoch}/{args.epochs}] Step {step}/{len(train_loader)} "
-                      f"ReconLoss: {recon_loss.item():.8f}, EmbedLoss: {embed_loss.item():.4f}, TotalLoss: {total_loss.item():.4f}")
+                      f"ReconLoss: {recon_loss.item():.8f}, EmbedLoss: {embed_loss.item():.4f}, TotalLoss: {total_loss.item():.4f}, "
+                      f"Current LR: {current_lr:.6f}")
             
             # 中途也可以做一次简单验证
             if step % args.val_interval == 0 and val_loader is not None:
@@ -271,10 +270,10 @@ def main():
                         action="store_true",
                         default=False,
                         help="使用基于 ITp 的分布式模式（如 MPI 的 OMPI 环境） if set.")
-    parser.add_argument("--dist_url",
-                        type=str,
-                        default="tcp://10.124.2.134:12355",
-                        help="用于分布式训练初始化的 URL (例如: tcp://主节点IP:端口).")
+    # parser.add_argument("--dist_url",
+    #                     type=str,
+    #                     default="tcp://10.124.2.134:12355",
+    #                     help="用于分布式训练初始化的 URL (例如: tcp://主节点IP:端口).")
     parser.add_argument("--rank",
                         type=int,
                         default=0,
@@ -294,27 +293,28 @@ def main():
     # ==============================
     # 这里是一些与训练VQ-VAE相关的参数,可随意添加
     # ==============================
-    parser.add_argument("--dataset", type=str, default="MyVoxelDataset", help="Dataset name for logging")
-    parser.add_argument("--batch_size", type=int, default=4, help="batch size per GPU")
+    parser.add_argument("--dataset", type=str, default="MyDatasetOnlyforVoxel", help="Dataset name for logging")
+    parser.add_argument("--validate_path", type=str, default='./output/d408_1024', help="12")
+    parser.add_argument("--batch_size", type=int, default=16, help="batch size per GPU")
     parser.add_argument("--num_workers", type=int, default=8, help="number of data loading workers")
     parser.add_argument("--pin_mem", action='store_true', help="use pin memory in DataLoader")
-    parser.add_argument("--checkpoint_dir", type=str, default="./checkpoints", help="Where to save checkpoints")
+    parser.add_argument("--checkpoint_dir", type=str, default="./checkpoints_408", help="Where to save checkpoints")
     parser.add_argument("--resume", action='store_true', help="resume training from ckpt")
     parser.add_argument("--resume_ckpt", type=str, default="", help="which ckpt to resume from")
     parser.add_argument("--lr", type=float, default=1e-4, help="learning rate for VQ-VAE") # 原版4.5e-6
-    parser.add_argument("--epochs", type=int, default=20, help="total epochs to train VQ-VAE")
+    parser.add_argument("--epochs", type=int, default=2, help="total epochs to train VQ-VAE")
     parser.add_argument("--save_interval", type=int, default=1000, help="save ckpt every n steps")
     parser.add_argument("--val_interval", type=int, default=2000, help="run validation every n steps")
-    parser.add_argument("--log_interval", type=int, default=50, help="print log every n steps")
+    parser.add_argument("--log_interval", type=int, default=10, help="print log every n steps")
     parser.add_argument("--save_end_of_epoch", action='store_true', help="save checkpoint at each epoch end") #flag
-    parser.add_argument("--use_scheduler", action='store_true', help="use StepLR scheduler or not")
+    parser.add_argument("--use_scheduler", action='store_false', help="use StepLR scheduler or not")
     parser.add_argument("--max_val_steps", type=int, default=5, help="max batch for val step")
 
     # 以下是模型参数，与VQ-VAE定义对应（示例）
     parser.add_argument("--inp_channels", type=int, default=80, help="输入通道数")
     parser.add_argument("--out_channels", type=int, default=80, help="输出通道数")
-    parser.add_argument("--mid_channels", type=int, default=1024, help="隐藏层通道数")
-    parser.add_argument("--z_channels", type=int, default=256, help="潜变量通道数")
+    parser.add_argument("--mid_channels", type=int, default=320, help="隐藏层通道数") # 1024
+    parser.add_argument("--z_channels", type=int, default=4, help="潜变量通道数") # 256
     parser.add_argument("--img_shape", type=lambda s: tuple(map(int, s.split(','))), default="80,60,100,1", help="图像数据形状")
     
 
@@ -331,7 +331,7 @@ def main():
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     # =======================
-    # 1) 数据加载 (与给出的代码保持一致, 仅稍作整理)
+    # 1) 数据加载
     # =======================
     logger.info(f"Initializing Dataset: {args.dataset}")
     dataset_train = MyDatasetOnlyforVoxel() 
@@ -339,7 +339,7 @@ def main():
     num_tasks = distributed_mode.get_world_size() # 1
     # 获取当前进程编号
     global_rank = distributed_mode.get_rank() # 0
-    print(f"num_tasks:{num_tasks}, global_rank:{global_rank}")
+    print(f"--------num_tasks:{num_tasks}, global_rank:{global_rank}-----------")
     
     sampler_train = torch.utils.data.DistributedSampler(
         dataset_train,
@@ -385,9 +385,13 @@ def main():
         '/mnt/bn/occupancy3d/workspace/lzy/Occ3d/work_dirs/pretrainv0.7_lsstpv_vits_multiextrin_datasetv0.2_rgb/epoch_1.pth',
         map_location='cpu'
     )['state_dict']
-    model.load_state_dict(state_dict, strict=False)
+    # model.load_state_dict(state_dict, strict=False)
+    print(model.load_state_dict(state_dict, strict=False))
     print("加载原始权重文件完毕") # 仅占用1492MB显存
-
+    # for name, param in model.named_parameters():
+    #     param.requires_grad = False
+    for param in model.parameters():
+        param.requires_grad = False  # 本模型仅用于推理，不参与梯度更新
     model.to(device) 
     model.eval()
 
