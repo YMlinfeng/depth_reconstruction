@@ -6,10 +6,10 @@ from modules.lsstpv_head import LSSTPVHead
 from modules.depth_anything_v2.dpt import DepthAnythingV2
 from einops import rearrange
 
-
 class LSSTPVDAv2OnlyForVoxel(nn.Module):
-    def __init__(self, num_classes=1):
+    def __init__(self, num_classes=1, args=None):
         super().__init__()
+        self.args = args
         model_configs = {
             "vits": {
                 "encoder": "vits",
@@ -42,6 +42,7 @@ class LSSTPVDAv2OnlyForVoxel(nn.Module):
                 Depth Map（深度图）
         '''
         self.pts_bbox_head = LSSTPVHead(
+            args=self.args,
             volume_h=[60, 30, 15, 8],
             volume_w=[100, 50, 25, 13],
             volume_z=[20, 10, 5, 3],
@@ -249,7 +250,7 @@ class LSSTPVDAv2(nn.Module):
                 Depth Map（深度图）
         '''
         self.pts_bbox_head = LSSTPVHead(
-            args=args,
+            args=self.args,
             volume_h=[60, 30, 15, 8],
             volume_w=[100, 50, 25, 13],
             volume_z=[20, 10, 5, 3],

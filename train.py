@@ -393,7 +393,7 @@ def main():
     # =======================
     # 2) 构造LSSTPVDAv2OnlyForVoxel模型 (推理模型, 不参与训练)
     # =======================
-    model = LSSTPVDAv2OnlyForVoxel(num_classes=4)
+    model = LSSTPVDAv2OnlyForVoxel(num_classes=4, args=args)
     print("模型初始化完毕")
     state_dict = torch.load(
         '/mnt/bn/occupancy3d/workspace/lzy/Occ3d/work_dirs/pretrainv0.7_lsstpv_vits_multiextrin_datasetv0.2_rgb/epoch_1.pth',

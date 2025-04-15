@@ -22,14 +22,16 @@ pip install thop
 pip install connected-components-3d
 
 ./TORCHRUN train.py \
---validate_path='./output/vqganlc_16384_4' \
---batch_size=16 \
+--validate_path='./output/vqganlc_16384_4_415' \
+--batch_size=8 \
 --epochs=5 \
 --lr=2e-4 \
 --num_workers=8 \
 --mid_channels=320 \
---checkpoint_dir="./checkpoints_vqganlc_16384_4" \
+--checkpoint_dir="./checkpoints_vqganlc_16384_4_415" \
 --model="VQModel" \
 --save_interval=1000 \
 --val_interval=4000 \
---n_vision_words=16384 \
+--n_vision_words=1024 \
+--model="VAERes2DImgDirectBC" \
+--mode="train" \

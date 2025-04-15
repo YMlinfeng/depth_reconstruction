@@ -790,17 +790,17 @@ class LSSTPVHead(nn.Module):
         # 1. sdf_preds[-1] 的形状为 (B, 4, 60, 100, 20)，重排后通道数为 4*20 = 80，
         #    与 VAERes2DImg 中设置的 inp_channels 和 out_channels 保持一致（均为80）。
         # 2. 经过 vqvae 处理后，重构输出保存在字典的 'logits' 字段中，其形状与原输入一致。
-        print("start compress")
-        args = None
-        vqvae_out = self.vqvae(sdf_preds[-1],args)  # 调用 VAE 压缩模块
-        # compressed_feature = vqvae_out['mid']     # 取出中间的压缩结果
-        reconstructed_sdf = vqvae_out['logits']  # 获取解码后的重构结果，其形状为 (B, 4, 60, 100, 20)
-        # 使用重构后的 sdf 替换原来的 sdf_preds[-1]，便于后续渲染流程观察重建效果
-        recon_loss = F.mse_loss(reconstructed_sdf, sdf_preds[0])  # 与输入 voxel 做 MSE
-        print(recon_loss)
-        sdf_preds[-1] = reconstructed_sdf
+        if self.args.mode == "eval":
+            print("start compress")
+            vqvae_out = self.vqvae(sdf_preds[-1],self.args)  # 调用 VAE 压缩模块
+            # compressed_feature = vqvae_out['mid']     # 取出中间的压缩结果
+            reconstructed_sdf = vqvae_out['logits']  # 获取解码后的重构结果，其形状为 (B, 4, 60, 100, 20)
+            # 使用重构后的 sdf 替换原来的 sdf_preds[-1]，便于后续渲染流程观察重建效果
+            recon_loss = F.mse_loss(reconstructed_sdf, sdf_preds[0])  # 与输入 voxel 做 MSE
+            print(recon_loss)
+            sdf_preds[-1] = reconstructed_sdf
 
-        print("start render")
+        # print("start render")
         lidar2img, lidar2cam = [], []
         for img_meta in img_metas:
             lidar2img.append(img_meta["lidar2img"])

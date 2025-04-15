@@ -792,10 +792,10 @@ class SamePadConv3d(nn.Module):
             pad_input.append((p // 2 + p % 2, p // 2))
         pad_input = sum(pad_input, tuple())
         self.pad_input = pad_input
-        print(f"Conv3d weight shape: {(out_channels, in_channels, *kernel_size)}")
+        # print(f"Conv3d weight shape: {(out_channels, in_channels, *kernel_size)}")
         self.conv = nn.Conv3d(in_channels, out_channels, kernel_size,
                               stride=stride, padding=0, bias=bias)
-        print("samepad conv end")
+        # print("samepad conv end")
 
     def forward(self, x):
         return self.conv(F.pad(x, self.pad_input))
@@ -815,9 +815,9 @@ class Encoder(nn.Module):
             print(i)
             self.convs.append(conv)
             n_times_downsample -= 1
-        print("+++++++++")
+        # print("+++++++++")
         self.conv_last = SamePadConv3d(in_channels, n_hiddens, kernel_size=3)
-        print("+++++++++")
+        # print("+++++++++")
         self.res_stack = nn.Sequential(
             *[AttentionResidualBlock(n_hiddens)
               for _ in range(n_res_layers)],
