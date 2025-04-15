@@ -502,6 +502,7 @@ from modules.render import RaySampler
 from modules.render.render_utils import nerf_models
 from modules.render.render_utils.rays import RayBundle
 from vqvae.vae_2d_resnet import VAERes2DImg, VAERes2DImgDirectBC
+from vqganlc.models.vqgan_lc import VQModel
 
 
 def constant_init(module, val, bias=0):
@@ -514,6 +515,7 @@ def constant_init(module, val, bias=0):
 class LSSTPVHead(nn.Module):
     def __init__(
         self,
+        args = None,
         num_classes=17,
         volume_h=200,
         volume_w=200,
@@ -531,7 +533,7 @@ class LSSTPVHead(nn.Module):
         num_imgs=3,
     ):
         super(LSSTPVHead, self).__init__()
-
+        self.args = args
         point_cloud_range = [0., -10., 0., 12., 10., 4.]
         voxel_size = 0.2
         lss_downsample = [1, 1, 1]
@@ -638,7 +640,13 @@ class LSSTPVHead(nn.Module):
         
         self.num_imgs = num_imgs
         self._init_layers()
-        # self.vqvae = VAERes2DImgDirectBC(inp_channels=80, out_channels=80, z_channels=4, mid_channels=320) #!!!
+        # print("VQVAELC init")
+        if args.mode == "eval":
+            print(f"init Model: {args.model}")
+            if args.model == "VAERes2DImgDirectBC":
+                self.vqvae = VAERes2DImgDirectBC(inp_channels=80, out_channels=80, z_channels=4, mid_channels=args.n_vision_words) 
+            else:
+                self.vqvae = VQModel(args, inp_channels=80, out_channels=80, z_channels=4, mid_channels=args.n_vision_words) 
 
 
     def _init_layers(
@@ -782,16 +790,17 @@ class LSSTPVHead(nn.Module):
         # 1. sdf_preds[-1] 的形状为 (B, 4, 60, 100, 20)，重排后通道数为 4*20 = 80，
         #    与 VAERes2DImg 中设置的 inp_channels 和 out_channels 保持一致（均为80）。
         # 2. 经过 vqvae 处理后，重构输出保存在字典的 'logits' 字段中，其形状与原输入一致。
-
-        # vqvae_out = self.vqvae(sdf_preds[-1])  # 调用 VAE 压缩模块
+        print("start compress")
+        args = None
+        vqvae_out = self.vqvae(sdf_preds[-1],args)  # 调用 VAE 压缩模块
         # compressed_feature = vqvae_out['mid']     # 取出中间的压缩结果
-        # reconstructed_sdf = vqvae_out['logits']  # 获取解码后的重构结果，其形状为 (B, 4, 60, 100, 20)
-        # # 使用重构后的 sdf 替换原来的 sdf_preds[-1]，便于后续渲染流程观察重建效果
-        # recon_loss = F.mse_loss(reconstructed_sdf, sdf_preds[0])  # 与输入 voxel 做 MSE
-        # print(recon_loss)
-        # sdf_preds[-1] = reconstructed_sdf
+        reconstructed_sdf = vqvae_out['logits']  # 获取解码后的重构结果，其形状为 (B, 4, 60, 100, 20)
+        # 使用重构后的 sdf 替换原来的 sdf_preds[-1]，便于后续渲染流程观察重建效果
+        recon_loss = F.mse_loss(reconstructed_sdf, sdf_preds[0])  # 与输入 voxel 做 MSE
+        print(recon_loss)
+        sdf_preds[-1] = reconstructed_sdf
 
-
+        print("start render")
         lidar2img, lidar2cam = [], []
         for img_meta in img_metas:
             lidar2img.append(img_meta["lidar2img"])

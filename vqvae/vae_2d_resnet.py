@@ -786,13 +786,16 @@ class SamePadConv3d(nn.Module):
         # assumes that the input shape is divisible by stride
         total_pad = tuple([k - s for k, s in zip(kernel_size, stride)])
         pad_input = []
+
         for p in total_pad[::-1]: # reverse since F.pad starts from last dim
+            print(p, total_pad[::-1])
             pad_input.append((p // 2 + p % 2, p // 2))
         pad_input = sum(pad_input, tuple())
         self.pad_input = pad_input
-
+        print(f"Conv3d weight shape: {(out_channels, in_channels, *kernel_size)}")
         self.conv = nn.Conv3d(in_channels, out_channels, kernel_size,
                               stride=stride, padding=0, bias=bias)
+        print("samepad conv end")
 
     def forward(self, x):
         return self.conv(F.pad(x, self.pad_input))
@@ -806,12 +809,15 @@ class Encoder(nn.Module):
         max_ds = n_times_downsample.max()
         for i in range(max_ds):
             in_channels = in_channels if i == 0 else n_hiddens
+            print(f"Encoder,i:{i}")
             stride = tuple([2 if d > 0 else 1 for d in n_times_downsample])
             conv = SamePadConv3d(in_channels, n_hiddens, 4, stride=stride)
+            print(i)
             self.convs.append(conv)
             n_times_downsample -= 1
+        print("+++++++++")
         self.conv_last = SamePadConv3d(in_channels, n_hiddens, kernel_size=3)
-
+        print("+++++++++")
         self.res_stack = nn.Sequential(
             *[AttentionResidualBlock(n_hiddens)
               for _ in range(n_res_layers)],
@@ -984,8 +990,9 @@ class VAERes2DImgDirectBC(nn.Module):
         self.pre_vq_conv = SamePadConv3d(mid_channels, z_channels, 1)
         
         # 参数：输入通道 mid_channels，残差层数24，下采样率为 (2,2,1) #通道维度从inp到mid
-        self.encoder_gpt = Encoder(mid_channels, 24, (2, 2, 1), in_channels=mid_channels)
+        self.encoder_gpt = Encoder(mid_channels, 24, (2, 2, 1), in_channels=mid_channels) #!
         
+        print('mid_channels:', mid_channels)
         # post_vq_conv: 用于将经过 VQ-VAE 量化后的 z，再映射回中间表示空间
         self.post_vq_conv = SamePadConv3d(z_channels, mid_channels, 1)
         
@@ -1000,6 +1007,7 @@ class VAERes2DImgDirectBC(nn.Module):
         # vqvae: 向量量化模块，用于将连续的潜变量表示离散化
         # 参数中 n_e 为嵌入字典中向量的数量（此处与 mid_channels 保持一致），e_dim 为编码维度（z_channels）
         # beta 作为量化损失的权重，use_voxel 表示使用体素数据（此配置可能针对3D场景）
+        print(mid_channels)
         self.vqvae = VectorQuantizer( # * 离散化不仅可以压缩信息，还能够有效约束生成模型的潜在分布
             n_e=mid_channels,      # 这里 n_e 默认为 mid_channels 的值（例如 1024）
             # n_e=512,      # 这里 n_e 默认为 mid_channels 的值（例如 256）

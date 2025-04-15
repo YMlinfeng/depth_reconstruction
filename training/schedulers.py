@@ -68,7 +68,7 @@ class SchedulerWrapper:
 
 # SchedulerFactory：根据策略名返回 SchedulerWrapper 实例
 class SchedulerFactory:
-    def __init__(self, optimizer, total_steps, warmup_steps=0, base_lr=1e-3, min_lr=1e-5):
+    def __init__(self, optimizer, total_steps, warmup_steps=0, base_lr=1e-3, min_lr=2e-7):
         self.optimizer = optimizer
         self.total_steps = total_steps
         self.warmup_steps = warmup_steps

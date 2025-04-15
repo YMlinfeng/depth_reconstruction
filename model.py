@@ -211,10 +211,10 @@ class LSSTPVDAv2OnlyForVoxel(nn.Module):
 
 
 class LSSTPVDAv2(nn.Module):
-    def __init__(self, num_classes=1):
+    def __init__(self, num_classes=1, args=None):
         # super().__init__()
         super(LSSTPVDAv2, self).__init__() # num_classes=1 指定 用于分类的类别数（例如，1 表示二分类，4 可能表示 4 类占用情况）
-
+        self.args = args
         model_configs = {
             "vits": {
                 "encoder": "vits",
@@ -249,6 +249,7 @@ class LSSTPVDAv2(nn.Module):
                 Depth Map（深度图）
         '''
         self.pts_bbox_head = LSSTPVHead(
+            args=args,
             volume_h=[60, 30, 15, 8],
             volume_w=[100, 50, 25, 13],
             volume_z=[20, 10, 5, 3],

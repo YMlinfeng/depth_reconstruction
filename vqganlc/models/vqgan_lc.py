@@ -891,8 +891,6 @@ class VQModel(torch.nn.Module):
                 ckpt_path=None,  # 可选的预训练模型文件路径，用于加载已有的权重
                 ignore_keys=[],  # 加载权重时需要忽略的键列表
                 image_key="image",  # 输入数据字典中图像对应的键名
-                colorize_nlabels=None,  # 如果需要颜色映射，该参数指定标签的数量（整数）
-                monitor=None,  # 用于模型监控或者调试的对象（可选）
                 remap=None,  # 可选参数，若需要重新映射输出编码索引则会用到
                 sane_index_shape=False,  # 标志，若 True，则量化器返回的索引形状为 (batch, height, width)
                 inp_channels=3,      # 输入图像的通道数，默认RGB图像（3通道）--80

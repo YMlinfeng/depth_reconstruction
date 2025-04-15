@@ -108,7 +108,7 @@ def validate_vqvae(args, vqvae, val_loader, model, device, epoch, step):
             # 取第一个输出作为 voxel
             result = result3[0]
             # VQ-VAE前向传播
-            vqvae_out = vqvae(result)
+            vqvae_out = vqvae(result, args)
             reconstructed_sdf = vqvae_out['logits']    # [B, 4, 60, 100, 20]
             embed_loss = vqvae_out['embed_loss']
 
@@ -129,7 +129,12 @@ def validate_vqvae(args, vqvae, val_loader, model, device, epoch, step):
             for i in range(len(views)):
                 depth_img = np.log10(depth[i] + 1e-8)  # 加上一个很小的数，避免 log(0)
                 plt.imsave(os.path.join(visual_dir, f'depth_{i}.png'), depth_img, cmap='jet')
-
+            
+            # todo 保存重建的深度图像逻辑还未实现
+            # reconstructed_depth = reconstructed_depth.view(len(views), input_shape[0] // 2, input_shape[1] // 2).detach().squeeze().cpu().numpy()
+            # for i in range(len(views)):
+            #     reconstructed_depth_img = np.log10(reconstructed_depth[i] + 1e-8)
+            #     plt.imsave(os.path.join(visual_dir, f'reconstructed_depth_{i}.png'), reconstructed_depth_img, cmap='jet')
             # 若只需要验证极少量的batch，则提前退出
             if total_steps >= args.max_val_steps:
                 break
@@ -159,11 +164,12 @@ def validate_vqvae(args, vqvae, val_loader, model, device, epoch, step):
 # ==============================
 def train_vqvae(args, model, vqvae, train_loader, val_loader, device):
     # optimizer = torch.optim.Adam(vqvae.parameters(), lr=args.lr, betas=(0.9, 0.999))
-    optimizer = torch.optim.AdamW(vqvae.parameters(), lr=args.lr, betas=(0.9, 0.999))
+    optimizer = torch.optim.AdamW(vqvae.parameters(), lr=args.lr, betas=(0.9, 0.999),weight_decay=0.01)
     # # 如果需要学习率调度，可以创建
 
     total_steps = len(train_loader) * args.epochs
-    warmup_steps = int(0.05 * total_steps)  # 5% warmup
+    # warmup_steps = int(0.05 * total_steps)  # 5% warmup
+    warmup_steps = 500  # 500 warmup
 
     if args.use_scheduler:
         factory = SchedulerFactory(
@@ -231,7 +237,7 @@ def train_vqvae(args, model, vqvae, train_loader, val_loader, device):
             if step % args.log_interval == 0:
                 print(f"[Epoch {epoch}/{args.epochs}] Step {step}/{len(train_loader)} "
                       f"ReconLoss: {recon_loss.item():.8f}, EmbedLoss: {embed_loss.item():.4f}, TotalLoss: {total_loss.item():.4f}, "
-                      f"Current LR: {current_lr:.6f}")
+                      f"Current LR: {current_lr:.12f}")
             
             # 中途也可以做一次简单验证
             if step % args.val_interval == 0 and val_loader is not None:
@@ -292,6 +298,7 @@ def main():
                         help="分布式后端（推荐使用 'nccl'）.")
     # ==============================
     parser.add_argument("--model", type=str, default="VQModel", help="choices: VAERes2DImgDirectBC, VQModel")
+    parser.add_argument("--mode", type=str, default="train", help="choices: train, eval")
     # 这里是一些与训练VQ-VAE相关的参数,可随意添加
     # ==============================
     parser.add_argument("--dataset", type=str, default="MyDatasetOnlyforVoxel", help="Dataset name for logging")
@@ -307,7 +314,7 @@ def main():
     parser.add_argument("--save_interval", type=int, default=1000, help="save ckpt every n steps")
     parser.add_argument("--val_interval", type=int, default=2000, help="run validation every n steps")
     parser.add_argument("--log_interval", type=int, default=10, help="print log every n steps")
-    parser.add_argument("--save_end_of_epoch", action='store_true', help="save checkpoint at each epoch end") #flag
+    parser.add_argument("--save_end_of_epoch", action='store_false', help="save checkpoint at each epoch end") #flag
     parser.add_argument("--use_scheduler", action='store_false', help="use StepLR scheduler or not")
     parser.add_argument("--max_val_steps", type=int, default=5, help="max batch for val step")
 
@@ -375,8 +382,8 @@ def main():
         val_loader = DataLoader(
             dataset_val,
             sampler=val_sampler,
-            batch_size=1,
-            num_workers=0,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
             pin_memory=False,
             drop_last=False,
             collate_fn=my_collate_fn
@@ -397,8 +404,8 @@ def main():
     print("加载原始权重文件完毕") # 仅占用1492MB显存
     # for name, param in model.named_parameters():
     #     param.requires_grad = False
-    for param in model.parameters():
-        param.requires_grad = False  # 本模型仅用于推理，不参与梯度更新
+    # for param in model.parameters():
+    #     param.requires_grad = False  # 本模型仅用于推理，不参与梯度更新
     model.to(device) 
     model.eval()
 
