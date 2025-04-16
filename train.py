@@ -122,10 +122,12 @@ def validate_vqvae(args, vqvae, val_loader, model, device, epoch, step):
             log_lines.append(f"Batch {total_steps}: ReconLoss = {recon_loss.item():.6f}, EmbedLoss = {embed_loss.item():.6f}, TotalLoss = {batch_loss.item():.6f}\n")
 
             # 保存验证过程中的图像
+            depths, rgbs = model.module.pts_bbox_head.decode_sdf([result, reconstructed_sdf], img_metas)
             views = ['CAM_FRONT', 'CAM_FRONT_LEFT', 'CAM_FRONT_RIGHT']
             input_shape = [518, 784]
             # 假设 result3[-1] 包含的是深度信息，重新调整张量形状后保存图像
-            depth = result3[-1].view(len(views), input_shape[0] // 2, input_shape[1] // 2).detach().squeeze().cpu().numpy()
+            print(depths[-1].shape)
+            depth = depths[-1][0].view(len(views), input_shape[0] // 7, input_shape[1] // 7).detach().squeeze().cpu().numpy()
             for i in range(len(views)):
                 depth_img = np.log10(depth[i] + 1e-8)  # 加上一个很小的数，避免 log(0)
                 plt.imsave(os.path.join(visual_dir, f'depth_{i}.png'), depth_img, cmap='jet')
@@ -223,7 +225,9 @@ def train_vqvae(args, model, vqvae, train_loader, val_loader, device):
             # =====================
             # 3) 计算loss并反向传播
             # =====================
-            recon_loss = F.mse_loss(reconstructed_sdf, voxel)  # 与输入 voxel 做 MSE
+            # recon_loss = F.mse_loss(reconstructed_sdf, voxel)  # 与输入 voxel 做 MSE
+            depths, rgbs = model.module.pts_bbox_head.decode_sdf([voxel, reconstructed_sdf], img_metas)
+            recon_loss = F.l1_loss(depths[0], depths[1]) + F.l1_loss(rgbs[0], rgbs[1])
             total_loss = recon_loss + embed_loss               # 总损失
             
             optimizer.zero_grad()

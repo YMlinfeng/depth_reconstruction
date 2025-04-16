@@ -1,5 +1,5 @@
 sudo apt update
-sudo apt install libgl1-mesa-glx
+sudo apt install libgl1-mesa-glx -y
 sudo apt install net-tools
 pip install torchdiffeq
 # pip install flow_matching
@@ -15,10 +15,10 @@ pip install debugpy
 pip install timm
 pip install clip
 pip install albumentations
-cd /mnt/bn/occupancy3d/workspace
-sudo chown -R tiger:tiger mzj
-chmod -R u+rwx mzj
-cd /mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/
+# cd /mnt/bn/occupancy3d/workspace
+# sudo chown -R tiger:tiger mzj
+# chmod -R u+rwx mzj
+# cd /mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/
 
 pip install thop
 pip install connected-components-3d

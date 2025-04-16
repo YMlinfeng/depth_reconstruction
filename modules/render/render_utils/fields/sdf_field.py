@@ -132,6 +132,11 @@ class SDFField(nn.Module):
         sdf = self.interpolate_feats(points, feature_volume[:1])
         return sdf, sdf, sdf
 
+    def get_color(self, points, feature_volume):
+        """predict the sdf value for ray samples"""
+        color = self.interpolate_feats(points, feature_volume[1:])
+        return color
+
     def get_density(self, ray_samples, feature_volume):
         """Computes and returns the densities."""
         points = ray_samples.frustums.get_start_positions()
@@ -168,7 +173,7 @@ class SDFField(nn.Module):
         )[0]
 
         directions = ray_samples.frustums.directions
-        rgb = sdf.repeat(1, 1, 3)
+        rgb = self.get_color(points, feature_volume)
         density = self.laplace_density(sdf)
 
         outputs.update(

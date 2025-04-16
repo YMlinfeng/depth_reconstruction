@@ -788,7 +788,7 @@ class SamePadConv3d(nn.Module):
         pad_input = []
 
         for p in total_pad[::-1]: # reverse since F.pad starts from last dim
-            print(p, total_pad[::-1])
+            # print(p, total_pad[::-1])
             pad_input.append((p // 2 + p % 2, p // 2))
         pad_input = sum(pad_input, tuple())
         self.pad_input = pad_input

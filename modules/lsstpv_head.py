@@ -528,8 +528,8 @@ class LSSTPVHead(nn.Module):
         downsample=16,
         numC_input=512,
         numC_Trans=128,
-        render_scale=2,
-        ray_sample_mode='fixed',
+        render_scale=7,
+        ray_sample_mode='cellular',
         num_imgs=3,
     ):
         super(LSSTPVHead, self).__init__()
@@ -782,6 +782,9 @@ class LSSTPVHead(nn.Module):
         # obtain lidar2cam and lidar2img
         sdf_preds = sdf_preds[-1:]
 
+        if self.args.mode != "eval":
+            return sdf_preds[-1], outputs[-1], outputs[-1]
+
         # todo 用vqgan对sdf 进行压缩（编码），压缩后不要进行任何操作，马上解压缩（解码），恢复原来的形状
         
         # todo --------------------------------------------------------------------
@@ -834,6 +837,44 @@ class LSSTPVHead(nn.Module):
 
         # return *sdf_preds, depth
         return sdf_preds[-1], outputs[-1], render_depths[-1]
+
+
+    def decode_sdf(self, sdf_preds, img_metas):
+        lidar2img, lidar2cam = [], []
+        for img_meta in img_metas:
+            lidar2img.append(img_meta["lidar2img"])
+            lidar2cam.append(img_meta["lidar2cam"])
+        lidar2img = torch.from_numpy(np.asarray(lidar2img)).to(sdf_preds[0])
+        lidar2cam = torch.from_numpy(np.asarray(lidar2cam)).to(sdf_preds[0])
+        # render depth
+        rays = self.sample_rays(sdf_preds[0], lidar2cam, lidar2img)
+        render_depths, render_rgbs = [], []
+        for i in range(len(sdf_preds)):
+            render_depth, render_rgb = [], []
+            for bs_idx in range(len(lidar2cam)):
+                i_ray_o, i_ray_d, i_ray_depth, scaled_points = (    # i_ray_o: n * num_points, 3 (6 * 512, 3)
+                    rays[bs_idx]["ray_o"],
+                    rays[bs_idx]["ray_d"],
+                    rays[bs_idx].get("depth", None),
+                    rays[bs_idx].get("scaled_points", None)
+                )
+                ray_bundle = RayBundle(
+                        origins=i_ray_o, directions=i_ray_d, depths=None # i_ray_depth
+                    )
+
+                preds_dict = self.render_model(
+                    ray_bundle, sdf_preds[i][bs_idx].permute(0, 3, 2, 1).contiguous(), points=scaled_points)
+
+                # 点到相机平面的depth
+                render_depth.append(self.depth2plane(i_ray_o, i_ray_d, preds_dict['depth'], lidar2img[bs_idx]))
+
+                # rgb
+                render_rgb.append(preds_dict['rgb'])
+
+            render_depths.append(torch.stack(render_depth, 0))
+            render_rgbs.append(torch.stack(render_rgb, 0))
+
+        return render_depths, render_rgbs
 
 
     def depth2plane(self, ray_o, ray_d, depth, lidar2img):
