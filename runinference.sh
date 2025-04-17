@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # 基本路径参数
-VISUAL_DIR="./output/d413/t16384_4_coswp/"
+VISUAL_DIR="./output/d413/t16384_4_coswp/8"
 JSONL_FILE="/mnt/bn/pretrain3d/real_word_data/preprocess/jsonls/dcr_data/2024_07_02-14_10_04-client_9a4bc499-3e43-49a5-a860-599d227b87ec.jsonl"
 MODEL_WEIGHT="/mnt/bn/occupancy3d/workspace/lzy/Occ3d/work_dirs/pretrainv0.7_lsstpv_vits_multiextrin_datasetv0.2_rgb/epoch_1.pth"
-VQVAE_WEIGHT="/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/checkpoints_vqganlc_16384_4/vqvae_epoch5_step2000.pth"
+VQVAE_WEIGHT="checkpoints_vqgan_1024_4_coswp_render_loss/vqvae_epoch1_step8000.pth"
 
 # 图像输入分辨率
 INPUT_HEIGHT=518
@@ -14,7 +14,7 @@ INPUT_WIDTH=784
 ENCODER_TYPE="vqgan"
 QUANTIZER_TYPE="default"
 TUNING_CODEBOOK=-1
-N_VISION_WORDS=16384
+N_VISION_WORDS=1024
 LOCAL_EMBEDDING_PATH=""
 USE_CBLINEAR=2
 RATE_P=0.0
@@ -22,7 +22,7 @@ DISC_START=0
 RATE_Q=1.0
 RATE_D=1.0
 MODE="eval"
-MODEL="VQModel"
+MODEL="VAERes2DImgDirectBC"
 
 # 启动 Python 推理脚本
 python3 inference.py \
