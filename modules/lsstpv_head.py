@@ -605,6 +605,10 @@ class LSSTPVHead(nn.Module):
         self.upsample_strides = upsample_strides
         self.out_indices = out_indices
 
+        if args.mode == "eval":
+            ray_sample_mode = 'fixed'
+            render_scale = 2
+
         # 定义sampler
         self.ray_sampler = RaySampler(
                 ray_sample_mode=ray_sample_mode,
