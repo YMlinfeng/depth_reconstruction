@@ -41,7 +41,7 @@ def main():
     parser.add_argument("--tuning_codebook", type=int, default=-1,
                         help="是否调优 codebook，-1 表示随机初始化且可调")
     parser.add_argument("--n_vision_words", type=int, default=1000,
-                        help="视觉词汇数量")
+                        help="codebook大小")
     parser.add_argument("--local_embedding_path", type=str, default="",
                         help="本地 embedding 的路径")
     parser.add_argument("--use_cblinear", type=int, default=2,
@@ -131,13 +131,7 @@ def main():
     img_meta['img_shape'] = [(input_shape[0], input_shape[1], 3)]
     img_metas = [img_meta]
 
-    # 创建模型并加载参数
-    # ----
-    print("start load model")
     model = LSSTPVDAv2(num_classes=4, args=args)
-    # 下一步会 覆盖 model 之前的 随机初始化参数
-    # 加载原始权重文件
-    print("--------------")
     state_dict = torch.load(
         args.model_weight,
         map_location='cpu'

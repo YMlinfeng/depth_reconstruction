@@ -782,10 +782,6 @@ class LSSTPVHead(nn.Module):
         # obtain lidar2cam and lidar2img
         sdf_preds = sdf_preds[-1:]
 
-        # todo 用vqgan对sdf 进行压缩（编码），压缩后不要进行任何操作，马上解压缩（解码），恢复原来的形状
-        
-        # todo --------------------------------------------------------------------
-        #
         # 说明：
         # 1. sdf_preds[-1] 的形状为 (B, 4, 60, 100, 20)，重排后通道数为 4*20 = 80，
         #    与 VAERes2DImg 中设置的 inp_channels 和 out_channels 保持一致（均为80）。

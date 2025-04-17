@@ -267,7 +267,6 @@ def train_vqvae(args, model, vqvae, train_loader, val_loader, device):
 #   5) 调用 train_vqvae()来训vqvae
 # ==============================
 def main():
-
     parser = argparse.ArgumentParser("Train VAERes2DImg VQ-VAE Model")
     # ---------------------------
     # 分布式训练参数
