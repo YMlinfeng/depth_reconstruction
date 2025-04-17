@@ -19,19 +19,22 @@ import torch.optim as optim
 import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torchvision import transforms
 
 # ===== 自定义模块 =====
 from vqvae.vae_2d_resnet import VAERes2DImg, VAERes2DImgDirectBC, VectorQuantizer
 from vqganlc.models.vqgan_lc import VQModel
-from training.pretrain_dataset import MyDatasetOnlyforVoxel
+from training.pretrain_dataset import MyDatasetOnlyforVoxel, MyDatasetOnlyforVAE
 from training.train_arg_parser import get_args_parser
 from model import LSSTPVDAv2OnlyForVoxel, LSSTPVDAv2
 from vismask.gen_vis_mask import sdf2occ
 from training import distributed_mode
 from training.schedulers import WarmupCosineLRScheduler, SchedulerFactory
+from diffusers import AutoencoderKLCogVideoX
 
 
 logger = logging.getLogger(__name__)
+
 
 def my_collate_fn(batch):
     """
@@ -44,11 +47,10 @@ def my_collate_fn(batch):
     metas = [item[1][0] for item in batch]
     return imgs, metas
 
-# ==============================
-# save_checkpoint: 用于将当前模型和优化器的状态保存到本地文件，
-# 以实现断点续训或事后analysis。
-# ==============================
+
 def save_checkpoint(save_path, epoch, vqvae, optimizer, lr_scheduler):
+    # save_checkpoint: 用于将当前模型和优化器的状态保存到本地文件，
+    # 以实现断点续训或事后analysis。
     # 准备保存字典，包含模型参数（vqvae.state_dict())、优化器参数、lr调度器参数、当前epoch等信息
     checkpoint = {
         'epoch': epoch,
@@ -59,11 +61,7 @@ def save_checkpoint(save_path, epoch, vqvae, optimizer, lr_scheduler):
     torch.save(checkpoint, save_path)
     print(f"=> Saved checkpoint to {save_path}")
 
-
-# ==============================
-# load_checkpoint: 在需要断点续训时，从已有的 checkpoint 文件中恢复
-# 训练的进度、模型参数、优化器参数等。
-# ==============================
+# load_checkpoint: 在需要断点续训时，从已有的 checkpoint 文件中恢复训练的进度、模型参数、优化器参数等。
 def load_checkpoint(ckpt_path, vqvae, optimizer, lr_scheduler):
     # 从 ckpt_path 加载 checkpoint 字典，然后恢复 epoch、模型参数、优化器参数等
     if not os.path.isfile(ckpt_path):
@@ -79,11 +77,6 @@ def load_checkpoint(ckpt_path, vqvae, optimizer, lr_scheduler):
     print(f"=> Loaded checkpoint from '{ckpt_path}', start_epoch {start_epoch}")
     return start_epoch
 
-
-# ==============================
-# validate_vqvae: 这里定义一个简单的验证过程，对一小部分batch进行推理，
-# 统计重构损失和embed_loss，帮助监控模型收敛情况。
-# ==============================
 def validate_vqvae(args, vqvae, val_loader, model, device, epoch, step):
     """
       1. 每次验证时，会创建一个新的子目录，目录名称包含当前 epoch 和 step 信息
@@ -124,9 +117,9 @@ def validate_vqvae(args, vqvae, val_loader, model, device, epoch, step):
             # 保存验证过程中的图像
             depths, rgbs = model.module.pts_bbox_head.decode_sdf([result, reconstructed_sdf], img_metas)
             views = ['CAM_FRONT', 'CAM_FRONT_LEFT', 'CAM_FRONT_RIGHT']
-            input_shape = [518, 784]
-            # 假设 result3[-1] 包含的是深度信息，重新调整张量形状后保存图像
+            input_shape = [args.input_height, args.input_width]
             print(depths[-1].shape)
+            # 假设 result3[-1] 包含的是深度信息，重新调整张量形状后保存图像
             depth = depths[-1][0].view(len(views), input_shape[0] // 7, input_shape[1] // 7).detach().squeeze().cpu().numpy()
             for i in range(len(views)):
                 depth_img = np.log10(depth[i] + 1e-8)  # 加上一个很小的数，避免 log(0)
@@ -153,21 +146,75 @@ def validate_vqvae(args, vqvae, val_loader, model, device, epoch, step):
     vqvae.train()  # 切换回训练模式
     return avg_loss
 
+def validate_vae(args, vqvae, val_loader, device, epoch, step):
+    vqvae.eval()
+    total_loss = 0
+    total_steps = 0
 
-# ==============================
-# train_vqvae: 这是核心训练循环。
-# 1) 取数据：从 train_loader 取 imgs, img_metas
-# 2) 不计算梯度地通过 model(LSSTPVDAv2OnlyForVoxel) 获得 voxel
-# 3) voxel 送入 vqvae，得到重构后的 sdf 和 embed_loss
-# 4) 计算总 loss = recon_loss + embed_loss
-# 5) backward + optimizer.step 更新参数
-# 6) 定期保存 checkpoint（断点续训）
-# 7) 定期进行验证 validate_vqvae()
-# ==============================
+    # 构造保存验证结果的文件夹，子目录名称包含 epoch 和 step 信息
+    visual_dir = os.path.join(args.validate_path, f'epoch_{epoch}_step_{step}')
+    os.makedirs(visual_dir, exist_ok=True)
+
+    # 用于存储每个batch的日志信息
+    log_lines = []
+
+    with torch.no_grad():
+        for imgs, img_metas in val_loader:
+            imgs = imgs.to(device)
+
+            # 3DVAE前向传播 (与训练类似，但不需要 backward)
+            encode_out = vqvae.encode(imgs, return_dict=True)
+            posterior = encode_out.latent_dist
+            # 一般验证时可用 mean 也可用 sample; 这里演示使用 mean()
+            z = posterior.mode()
+            decode_out = vqvae.decode(z, return_dict=True)
+            recons = decode_out.sample
+
+            # 计算损失
+            # 同样：MSE 重构损失 + KL
+            kl_loss = posterior.kl().mean()
+            recon_loss = F.mse_loss(recons, imgs)
+            loss = recon_loss + kl_loss
+
+            total_loss += loss.item()
+            total_steps += 1
+
+            # 如果需要可在这里把 recons 转存为图像或视频，以进行可视化
+            # 下面示例仅演示保存某个 batch 的第一帧+第一通道
+            if total_steps <= args.max_val_steps:
+                # 假设只可视化一帧 + Depth or RGB, 这里你可自行处理
+                # recons: [B, 4, 1, h, w], 先取 batch_idx=0, channel=0
+                recon_slice = recons[0, 0, 0].detach().cpu().numpy()  
+                # 归一化并转成可保存的图
+                recon_slice_norm = (recon_slice - recon_slice.min()) / (recon_slice.max() - recon_slice.min() + 1e-7)
+                save_name = os.path.join(visual_dir, f"val_step_{total_steps}_recon.png")
+                cv2.imwrite(save_name, (recon_slice_norm*255).astype(np.uint8))
+
+    avg_loss = total_loss / max(1, total_steps)
+    log_lines.append(f"\n[Validation] Average Loss = {avg_loss:.6f}\n")
+
+    # 将日志写入到指定文件中
+    log_file_path = os.path.join(visual_dir, "validation_log.txt")
+    with open(log_file_path, "w") as f:
+        f.writelines(log_lines)
+
+    print(f"[Validation] avg loss = {avg_loss:.6f} (log and images saved to: {visual_dir})")
+    vqvae.train()
+    return avg_loss
+
+
 def train_vqvae(args, model, vqvae, train_loader, val_loader, device):
-    # optimizer = torch.optim.Adam(vqvae.parameters(), lr=args.lr, betas=(0.9, 0.999))
+    # ==============================
+    # train_vqvae: 这是核心训练循环。
+    # 1) 取数据：从 train_loader 取 imgs, img_metas
+    # 2) 不计算梯度地通过 model(LSSTPVDAv2OnlyForVoxel) 获得 voxel
+    # 3) voxel 送入 vqvae，得到重构后的 sdf 和 embed_loss
+    # 4) 计算总 loss = recon_loss + embed_loss
+    # 5) backward + optimizer.step 更新参数
+    # 6) 定期保存 checkpoint（断点续训）
+    # 7) 定期进行验证 validate_vqvae()
+    # ==============================
     optimizer = torch.optim.AdamW(vqvae.parameters(), lr=args.lr, betas=(0.9, 0.999),weight_decay=0.01)
-    # # 如果需要学习率调度，可以创建
 
     total_steps = len(train_loader) * args.epochs
     # warmup_steps = int(0.05 * total_steps)  # 5% warmup
@@ -236,6 +283,8 @@ def train_vqvae(args, model, vqvae, train_loader, val_loader, device):
             if lr_scheduler:
                 lr_scheduler.step()
                 current_lr = lr_scheduler.get_lr()
+            else:
+                current_lr = args.lr
                 
             # 打印或记录训练日志
             if step % args.log_interval == 0:
@@ -245,21 +294,126 @@ def train_vqvae(args, model, vqvae, train_loader, val_loader, device):
             
             # 中途也可以做一次简单验证
             if step % args.val_interval == 0 and val_loader is not None:
-                validate_vqvae(args, vqvae, val_loader, model, device, epoch, step)
+                if args.general_mode == "vqgan":
+                    validate_vqvae(args, vqvae, val_loader, model, device, epoch, step)
+                else:
+                    validate_vae(args, vqvae, val_loader, device, epoch, step)
             
             # =====================
             # 4) 定期保存checkpoint
             # =====================
             if step % args.save_interval == 0:
-                save_path = os.path.join(args.checkpoint_dir, f"vqvae_epoch{epoch}_step{step}.pth")
+                save_path = os.path.join(args.checkpoint_dir, f"{args.general_mode}_epoch{epoch}_step{step}.pth")
                 save_checkpoint(save_path, epoch, vqvae, optimizer, lr_scheduler)
         
         # 每个epoch结束后也可以保存一次
         if args.save_end_of_epoch:
-            save_path = os.path.join(args.checkpoint_dir, f"vqvae_epoch{epoch}.pth")
+            save_path = os.path.join(args.checkpoint_dir, f"{args.general_mode}_epoch{epoch}.pth")
             save_checkpoint(save_path, epoch, vqvae, optimizer, lr_scheduler)
     
     print("Training Finished!")
+
+
+def train_vae(args, vqvae, train_loader, val_loader, device):
+    optimizer = torch.optim.AdamW(vqvae.parameters(), lr=args.lr, betas=(0.9, 0.999),weight_decay=0.01)
+
+    total_steps = len(train_loader) * args.epochs
+    # warmup_steps = int(0.05 * total_steps)  # 5% warmup
+    warmup_steps = 500  # 500 warmup
+
+    if args.use_scheduler:
+        factory = SchedulerFactory(
+            optimizer=optimizer,
+            total_steps=total_steps,
+            warmup_steps=warmup_steps,
+            base_lr=args.lr,
+            min_lr=1e-6
+        )
+        lr_scheduler = factory.get(name="cosine")  # 返回 SchedulerWrapper
+    else:
+        lr_scheduler = None
+
+    # 尝试加载 checkpoint（若 args.resume 为 True，且在 args.resume_ckpt 中指定了 ckpt 文件路径）
+    start_epoch = 1
+    if args.resume:
+        start_epoch = load_checkpoint(args.resume_ckpt, vqvae, optimizer, lr_scheduler)
+    
+    vqvae.train()
+
+    # 在训练开始之前，打印一下当前 GPU 显存占用
+    print(f"[Before Training] GPU Memory allocated: {torch.cuda.memory_allocated(device)/1024/1024:.2f} MB | " \
+          f"max allocated: {torch.cuda.max_memory_allocated(device)/1024/1024:.2f} MB")
+
+    # 主训练循环，从 start_epoch 到 args.epochs，每个epoch遍历一遍 train_loader
+    for epoch in range(start_epoch, args.epochs + 1):
+        # 若使用了分布式Sampler，需要设置当前epoch，以便它做好shuffle
+        if hasattr(train_loader.sampler, 'set_epoch'):
+            train_loader.sampler.set_epoch(epoch)
+        
+        for step, (imgs, img_metas) in enumerate(train_loader, start=1):
+            imgs = imgs.to(device, non_blocking=True)
+            
+
+            # =====================
+            # 1) 3DVAE前向传播
+            # (1) encode => 得到后验分布
+            # (2) reparameterize (sampling)
+            # (3) decode => 重构输出
+            # todo 选择先在此处对 imgs 做零填充(F.pad) 以保证 /8 整除
+            encode_out = vqvae.encode(imgs, return_dict=True) #todo
+            posterior = encode_out.latent_dist
+            kl_loss = posterior.kl().mean()  # 标准KL散度损失(相对于N(0,1))
+
+            # reparameterize: 这里采用随机采样
+            z = posterior.sample()
+            # print(z.shape) # ([1, 16, 2, 65, 98])
+
+            # 解码
+            decode_out = vqvae.decode(z, return_dict=True)
+            recons = decode_out.sample  # [B, 4, 1, h', w'] (按实际网络结构可能会包含pad)
+            # print(recons.shape) # ([1, 4, 1, 520, 784])
+
+            # =====================
+            # 2) 计算loss并反向传播
+            # =====================
+            #todo 该任务对 Depth 渠道或者多帧时序还有专门的损失方式（例如对 Depth 使用别的指标），也可在此处把 recon_loss 拆分成 RGB 重构损失、Depth 重构损失、以及时域上的一致性损失等等
+            recon_loss = F.mse_loss(recons, imgs)
+            # todo VAE 训练中，KL 损失容易出现“塌陷”或“KL 消失”的问题
+            total_loss = recon_loss + kl_loss  # 最简单的 VAE 损失: recon_loss + KL
+
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
+            if lr_scheduler:
+                lr_scheduler.step()
+                current_lr = lr_scheduler.get_lr()
+            else:
+                current_lr = args.lr
+            
+            # 打印或记录训练日志
+            if step % args.log_interval == 0:
+                print(f"[Epoch {epoch}/{args.epochs}] Step {step}/{len(train_loader)} "
+                      f"ReconLoss: {recon_loss.item():.6f} "
+                      f"KL: {kl_loss.item():.6f} "
+                      f"TotalLoss: {total_loss.item():.6f} "
+                      f"LR: {current_lr:.6f}")
+
+            # 中途进行验证
+            if step % args.val_interval == 0 and val_loader is not None:
+                validate_vae(args, vqvae, val_loader, device, epoch, step)
+
+            # 定期保存checkpoint
+            if step % args.save_interval == 0:
+                save_path = os.path.join(args.checkpoint_dir, f"vqvae_epoch{epoch}_step{step}.pth")
+                save_checkpoint(save_path, epoch, vqvae, optimizer, lr_scheduler)
+        
+        if args.save_end_of_epoch:
+            save_path = os.path.join(args.checkpoint_dir, f"vqvae_epoch{epoch}.pth")
+            save_checkpoint(save_path, epoch, vqvae, optimizer, lr_scheduler)           
+    
+    print("Training Finished!")
+
+
 
 
 # ==============================
@@ -271,7 +425,8 @@ def train_vqvae(args, model, vqvae, train_loader, val_loader, device):
 #   5) 调用 train_vqvae()来训vqvae
 # ==============================
 def main():
-    parser = argparse.ArgumentParser("Train VAERes2DImg VQ-VAE Model")
+
+    parser = argparse.ArgumentParser("Train VQ-VAE/VAE Model")
     # ---------------------------
     # 分布式训练参数
     # ---------------------------
@@ -300,8 +455,9 @@ def main():
                         default="nccl",
                         help="分布式后端（推荐使用 'nccl'）.")
     # ==============================
-    parser.add_argument("--model", type=str, default="VQModel", help="choices: VAERes2DImgDirectBC, VQModel")
+    parser.add_argument("--model", type=str, default="VQModel", help="choices: VAERes2DImgDirectBC, VQModel, Cog3DVAE")
     parser.add_argument("--mode", type=str, default="train", help="choices: train, eval")
+    parser.add_argument("--general_mode", type=str, default="vae", help="choices: vae, vqgan")
     # 这里是一些与训练VQ-VAE相关的参数,可随意添加
     # ==============================
     parser.add_argument("--dataset", type=str, default="MyDatasetOnlyforVoxel", help="Dataset name for logging")
@@ -322,6 +478,10 @@ def main():
     parser.add_argument("--max_val_steps", type=int, default=5, help="max batch for val step")
 
     # 以下是模型参数，与VQ-VAE定义对应（示例）
+    parser.add_argument("--input_height", type=int, default=518,
+                        help="图像输入高度")
+    parser.add_argument("--input_width", type=int, default=784,
+                        help="图像输入宽度")
     parser.add_argument("--inp_channels", type=int, default=80, help="输入通道数")
     parser.add_argument("--out_channels", type=int, default=80, help="输出通道数")
     parser.add_argument("--mid_channels", type=int, default=320, help="隐藏层通道数") # 1024
@@ -333,10 +493,10 @@ def main():
     parser.add_argument("--use_cblinear", type=int, default=2, help="Using Projector") # 1是Linear，2是MLP
     parser.add_argument("--quantizer_type", type=str, default="default", help="Quantizer类型") # 非 EMA 情况
     # parser.add_argument("--local_embedding_path", default="cluster_codebook_1000cls_100000.pth")
-    parser.add_argument("--n_vision_words", type=int, default=16384, help="Codebook Size?")
+    parser.add_argument("--n_vision_words", type=int, default=16384, help="Codebook Size")
 
     args = parser.parse_args()
-
+    print(args)
     # -------------------------------
     # 初始化分布式环境 (多机多卡 or 单机多卡)
     # -------------------------------
@@ -351,7 +511,10 @@ def main():
     # 1) 数据加载
     # =======================
     logger.info(f"Initializing Dataset: {args.dataset}")
-    dataset_train = MyDatasetOnlyforVoxel() 
+    if args.general_mode == "vae":
+        dataset_train = MyDatasetOnlyforVAE(args) 
+    elif args.general_mode == "vqgan":
+        dataset_train = MyDatasetOnlyforVoxel(args)
     # 获取总进程数
     num_tasks = distributed_mode.get_world_size() # 1
     # 获取当前进程编号
@@ -371,7 +534,7 @@ def main():
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=True,
-        collate_fn=my_collate_fn
+        collate_fn=my_collate_fn,
     )
     logger.info("Intializing DataLoader")
 
@@ -389,28 +552,29 @@ def main():
             num_workers=args.num_workers,
             pin_memory=False,
             drop_last=False,
-            collate_fn=my_collate_fn
+            collate_fn=my_collate_fn,
         )
         logger.info("Initialized a small validation set from training data")
 
     # =======================
     # 2) 构造LSSTPVDAv2OnlyForVoxel模型 (推理模型, 不参与训练)
     # =======================
-    model = LSSTPVDAv2OnlyForVoxel(num_classes=4, args=args)
-    print("模型初始化完毕")
-    state_dict = torch.load(
-        '/mnt/bn/occupancy3d/workspace/lzy/Occ3d/work_dirs/pretrainv0.7_lsstpv_vits_multiextrin_datasetv0.2_rgb/epoch_1.pth',
-        map_location='cpu'
-    )['state_dict']
-    # model.load_state_dict(state_dict, strict=False)
-    print(model.load_state_dict(state_dict, strict=False))
-    print("加载原始权重文件完毕") # 仅占用1492MB显存
-    # for name, param in model.named_parameters():
-    #     param.requires_grad = False
-    # for param in model.parameters():
-    #     param.requires_grad = False  # 本模型仅用于推理，不参与梯度更新
-    model.to(device) 
-    model.eval()
+    if args.general_mode == "vqgan":
+        model = LSSTPVDAv2OnlyForVoxel(num_classes=4, args=args)
+        print("模型初始化完毕")
+        state_dict = torch.load(
+            '/mnt/bn/occupancy3d/workspace/lzy/Occ3d/work_dirs/pretrainv0.7_lsstpv_vits_multiextrin_datasetv0.2_rgb/epoch_1.pth',
+            map_location='cpu'
+        )['state_dict']
+        # model.load_state_dict(state_dict, strict=False)
+        print(model.load_state_dict(state_dict, strict=False))
+        print("加载原始权重文件完毕") # 仅占用1492MB显存
+        # for name, param in model.named_parameters():
+        #     param.requires_grad = False
+        # for param in model.parameters():
+        #     param.requires_grad = False  # 本模型仅用于推理，不参与梯度更新
+        model.to(device) 
+        model.eval()
 
     # =======================
     # 3) 构造 VQ-VAE (训练模型)
@@ -435,6 +599,15 @@ def main():
             z_channels=args.z_channels,
             vqvae_cfg=vqvae_cfg
         )
+    elif args.model == "Cog3DVAE":
+        vqvae = AutoencoderKLCogVideoX(
+            in_channels=args.inp_channels,
+            out_channels=args.out_channels,
+            sample_height=args.input_height,
+            sample_width=args.input_width,
+            latent_channels=4,
+            temporal_compression_ratio=4.0,
+        )
     else:
         raise ValueError("未识别的模型类型: " + args.model)
     
@@ -445,20 +618,21 @@ def main():
     # 注意：LSSTPVDAv2OnlyForVoxel 只推理，不训练；若仍想让其多卡并行以分摊显存，也可DDP
     # -------------------------------------------------------------------
     if distributed_mode.get_world_size() > 1:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+        if args.general_mode == "vqgan":
+            model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
         vqvae = DDP(vqvae, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False) # 根据warning修正
-        print("[DDP] Wrapped both model and vqvae with DistributedDataParallel")
+        print("[DDP] Wrapped both model and vqvae/vae with DistributedDataParallel")
 
     # =======================
     # 统计两模型的参数量，并打印显存占用
     # =======================
     # 对 model (LSSTPVDAv2OnlyForVoxel) 进行统计
-    model_total_params = sum(p.numel() for p in model.parameters())
-    model_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    # model_total_params = sum(p.numel() for p in model.parameters())
+    # model_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     # 对 vqvae 进行统计
     vqvae_total_params = sum(p.numel() for p in vqvae.parameters())
     vqvae_trainable_params = sum(p.numel() for p in vqvae.parameters() if p.requires_grad)
-    print(f"[Model Param Count] LSSTPVDAv2OnlyForVoxel total: {model_total_params}, trainable: {model_trainable_params}")
+    # print(f"[Model Param Count] LSSTPVDAv2OnlyForVoxel total: {model_total_params}, trainable: {model_trainable_params}")
     print(f"[Model Param Count] VQ-VAE total: {vqvae_total_params}, trainable: {vqvae_trainable_params}")
 
     current_alloc = torch.cuda.memory_allocated(device)/1024/1024
@@ -468,8 +642,10 @@ def main():
     # =======================
     # 4) 进入训练循环
     # =======================
-    train_vqvae(args, model, vqvae, train_loader, val_loader, device)
-
+    if args.general_mode == "vqgan":
+        train_vqvae(args, model, vqvae, train_loader, val_loader, device)
+    elif args.general_mode == "vae":
+        train_vae(args, vqvae, train_loader, val_loader, device)
     # 结束
     print("Done!")
 
