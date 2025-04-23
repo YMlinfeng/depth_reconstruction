@@ -844,6 +844,8 @@ class LSSTPVHead(nn.Module):
 
 
     def decode_sdf(self, sdf_preds, img_metas):
+        if sdf_preds[0].shape[1] != 4:
+            sdf_preds = [self.sdf[-1](sdf_pred) for sdf_pred in sdf_preds]
         lidar2img, lidar2cam = [], []
         for img_meta in img_metas:
             lidar2img.append(img_meta["lidar2img"])

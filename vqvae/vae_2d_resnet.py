@@ -1107,6 +1107,84 @@ class VAERes2DImgDirectBC(nn.Module):
     # 目的：推理模式下直接从给定的 z 生成对应的图像输出
 
 
+# 直接扩大codebook的大小
+class VAERes3DImgDirectBC(nn.Module):
+    def __init__(
+        self,
+        inp_channels=3,      # 输入图像的通道数，默认RGB图像（3通道）--80
+        out_channels=3,      # 输出图像通道数，通常与输入图像通道数一致 --80
+        mid_channels=256,    # Encoder的输出通道，用于投射到更高维特征空间 -- 1024
+        z_channels=4,        # 潜变量 z 的通道数（通常较小，用于压缩表示）-- 256
+        vqvae_cfg=None,      # VQ-VAE的配置（当前版本中未使用该变量，可扩展）
+        height=5,
+    ):
+        super().__init__()
+        
+        self.height = height
+        self.pre_vq_conv = SamePadConv3d(mid_channels * height, z_channels, 1)
+        self.encoder_gpt = Encoder(mid_channels, 24, (2, 2, 4), in_channels=mid_channels) #!
+        
+        print('mid_channels:', mid_channels)
+        self.post_vq_conv = SamePadConv3d(z_channels, mid_channels * height, 1)
+        self.decoder_gpt = Decoder(mid_channels, 24, (2, 2, 4), out_channel=mid_channels)
+        
+        self.embedder = nn.Linear(inp_channels, mid_channels)
+
+        self.embedder_t = nn.Linear(mid_channels, out_channels)
+        print(mid_channels)
+        self.vqvae = VectorQuantizer( # * 离散化不仅可以压缩信息，还能够有效约束生成模型的潜在分布
+            n_e=mid_channels * height,      # 这里 n_e 默认为 mid_channels 的值（例如 1024）
+            # n_e=512,      # 这里 n_e 默认为 mid_channels 的值（例如 256）
+            e_dim=mid_channels * height,    # e_dim 默认为 z_channels 的值（例如 256）#! 应该必须是相等的
+            beta=1., 
+            z_channels=z_channels, # 编码器（Encoder）：首先将输入图像编码成一个低维的、隐空间（latent space）的表示。对于每个输入图像，编码器产生的输出特征图的通道数由配置参数 ddconfig["z_channels"] 定义，这里面的表示我们常称为“z”
+            use_voxel=True
+        )
+    
+    def sample_z(self, z):
+        dim = z.shape[1] // 2
+        mu = z[:, :dim]              # 均值向量
+        sigma = torch.exp(z[:, dim:] / 2)  # 标准差，通过对数方差转换得到
+        eps = torch.randn_like(mu)     # 随机噪声 epsilon
+        return mu + sigma * eps, mu, sigma
+
+    def forward_encoder(self, x):
+        bs, C, H, W, D = x.shape
+        x = rearrange(x, 'b c h w d -> b h w d c')
+        x = self.embedder(x)
+        x = rearrange(x, 'b h w d c -> b c h w d')
+        x = self.encoder_gpt(x)
+        x = rearrange(x, 'b c h w d -> b (c d) h w')
+        x = self.pre_vq_conv(x.unsqueeze(-1))
+        return x
+
+    def forward_decoder(self, z, input_shape):
+        z = self.post_vq_conv(z)
+        z = rearrange(z, 'b (c d) h w dd -> b c h w (d dd)', d=self.height)
+        x = self.decoder_gpt(z)
+        similarity = self.embedder_t(x.permute(0, 2, 3, 4, 1))
+        similarity = rearrange(similarity, 'b h w d c -> b c h w d')
+        return similarity
+
+    def forward(self, x, args, **kwargs): # x.shape: torch.Size([B, 4, 60, 100, 20])
+        output_dict = {}  # 用于存放各个步骤的输出结果
+        z = self.forward_encoder(x) # z.shape: torch.Size([1, 4, 30, 50, 1])
+        
+        z_sampled, loss, info = self.vqvae(z, is_voxel=False) # z_sampled.shape: torch.Size([1, 4, 30, 50, 1])
+        output_dict.update({'embed_loss': loss})
+        
+        mid = z_sampled  # 可选地保存中间量化表示
+        logits = self.forward_decoder(z_sampled, x.shape) # logits.shape: torch.Size([1, 4, 60, 100, 20])
+        
+        output_dict.update({'logits': logits})
+        output_dict.update({'mid': mid})
+        return output_dict
+
+    def generate(self, z, input_shape):
+        logits = self.forward_decoder(z, input_shape)
+        return {'logits': logits}
+
+
 if __name__ == "__main__":
     vae = VAERes3DVoxel().cuda()
     inp = torch.rand(2, 4, 60, 100, 20).cuda()
