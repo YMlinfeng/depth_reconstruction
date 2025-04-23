@@ -22,7 +22,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torchvision import transforms
 
 # ===== 自定义模块 =====
-from vqvae.vae_2d_resnet import VAERes2DImg, VAERes2DImgDirectBC, VectorQuantizer
+from vqvae.vae_2d_resnet import VAERes2DImg, VAERes2DImgDirectBC, VectorQuantizer, VAERes3DImgDirectBC
 from vqganlc.models.vqgan_lc import VQModel
 from training.pretrain_dataset import MyDatasetOnlyforVoxel, MyDatasetOnlyforVAE
 from training.train_arg_parser import get_args_parser
@@ -264,7 +264,7 @@ def train_vqvae(args, model, vqvae, train_loader, val_loader, device):
             # 2) VQ-VAE前向传播
             # =====================
             # import pdb; pdb.set_trace()
-            voxel = voxel3[0]
+            voxel = voxel3[1]
             vqvae_out = vqvae(voxel, args)   # 包含 'logits', 'embed_loss', 'mid'
             reconstructed_sdf = vqvae_out['logits']  # 重构结果 [B,4,60,100,20]
             embed_loss = vqvae_out['embed_loss']     # 量化损失(标量)
@@ -584,6 +584,14 @@ def main():
 
     if args.model == "VAERes2DImgDirectBC":
         vqvae = VAERes2DImgDirectBC(
+            inp_channels=args.inp_channels,
+            out_channels=args.out_channels,
+            mid_channels=args.mid_channels,
+            z_channels=args.z_channels,
+            vqvae_cfg=vqvae_cfg
+        )
+    elif args.model == "VAERes3DImgDirectBC":
+        vqvae = VAERes3DImgDirectBC(
             inp_channels=args.inp_channels,
             out_channels=args.out_channels,
             mid_channels=args.mid_channels,
