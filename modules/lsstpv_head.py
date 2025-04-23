@@ -645,7 +645,7 @@ class LSSTPVHead(nn.Module):
         self.num_imgs = num_imgs
         self._init_layers()
         # print("VQVAELC init")
-        if args.mode == "eval":
+        if args.general_mode == "vqgan" and args.mode == "eval":
             print(f"init Model: {args.model}")
             if args.model == "VAERes2DImgDirectBC":
                 self.vqvae = VAERes2DImgDirectBC(inp_channels=80, out_channels=80, z_channels=4, mid_channels=args.n_vision_words) 
@@ -797,7 +797,7 @@ class LSSTPVHead(nn.Module):
         # 1. sdf_preds[-1] 的形状为 (B, 4, 60, 100, 20)，重排后通道数为 4*20 = 80，
         #    与 VAERes2DImg 中设置的 inp_channels 和 out_channels 保持一致（均为80）。
         # 2. 经过 vqvae 处理后，重构输出保存在字典的 'logits' 字段中，其形状与原输入一致。
-        if self.args.mode == "eval":
+        if self.args.general_mode == "vqgan" and self.args.mode == "eval":
             print("start compress")
             vqvae_out = self.vqvae(sdf_preds[-1],self.args)  # 调用 VAE 压缩模块
             # compressed_feature = vqvae_out['mid']     # 取出中间的压缩结果

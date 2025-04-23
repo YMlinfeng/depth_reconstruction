@@ -54,8 +54,9 @@ def main():
                         help="q 路径的损失比率")
     parser.add_argument("--rate_d", type=float, default=1.0,
                         help="判别器的损失比率")   
-    parser.add_argument("--model", type=str, default="VQModel", help="choices: VAERes2DImgDirectBC, VQModel")
-    parser.add_argument("--mode", type=str, default="train", help="choices: train, eval")
+    parser.add_argument("--model", type=str, default="Cog3DVAE", help="choices: VAERes2DImgDirectBC, VQModel, Cog3DVAE")
+    parser.add_argument("--mode", type=str, default="eval", help="choices: train, eval")
+    parser.add_argument("--general_mode", type=str, default="vae", help="choices: vae, vqgan")
     args = parser.parse_args()
 
     device = get_device()
@@ -70,21 +71,18 @@ def main():
     # print("等待调试器连接...") #按F5
     # debugpy.wait_for_client()
 
-    # 保存路径
     visual_dir = args.visual_dir
     os.makedirs(visual_dir, exist_ok=True)
-
-    # 加载信息 JSON Lines，一种每行都是一个 JSON 对象的格式
     sample = open(args.jsonl_file, 'r').readlines()[0] # readlines()[0] 只读取第一个 JSON 对象（通常对应一帧数据）
     sample = json.loads(sample) # json.loads() 将字符串转换为 Python 字典（dict）
 
-    # 加载前视三目图像
     views = ['CAM_FRONT', 'CAM_FRONT_LEFT', 'CAM_FRONT_RIGHT']
     imgs = [cv2.imread(sample['images'][view]) for view in views]
 
-    # 可视化
     for i in range(len(imgs)):
-        cv2.imwrite(f'{visual_dir}/{i}.png', imgs[i])
+        if imgs[i] is None:
+            raise ValueError(f"第{i}张RGB图像读取失败，请检查路径！")
+        cv2.imwrite(f'{visual_dir}/{i}_rgb.png', imgs[i])
 
     # 加载三个相机各自的内外参
     # intrins 存储各相机的 内参矩阵（用于像素坐标到相机坐标的变换）。
@@ -98,9 +96,7 @@ def main():
     ego2imgs = []  # 存储转换矩阵（从 ego 车体坐标系到图像坐标系）
     ego2cams = []  # 存储转换矩阵（从 ego 车体坐标系到相机坐标系）
     intrinss = []  # 存储调整后的内参矩阵
-
-    # 图像输入分辨率调整
-    input_shape = [args.input_height, args.input_width]  # !目标输入分辨率
+    input_shape = [args.input_height, args.input_width]  
 
     # 图像resize后，对应的内参也要resize
     src_shape = imgs[0].shape[:2]  # 原始图像的高度和宽度
@@ -137,14 +133,15 @@ def main():
         map_location='cpu'
     )['state_dict']
     print(model.load_state_dict(state_dict, strict=False))
-
-    loaded = torch.load(
-        args.vqvae_weight,
-        map_location='cpu'
-    )['vqvae_state_dict']
-    vqvae_state = {k.replace('module.', ''): v for k, v in loaded.items()}
-    print(len(vqvae_state)) # 1565
-    print(model.pts_bbox_head.vqvae.load_state_dict(vqvae_state, strict=False))
+    print("加载原始权重文件完毕")
+    if args.general_mode == "vqgan":
+        loaded = torch.load(
+            args.vqvae_weight,
+            map_location='cpu'
+        )['vqvae_state_dict']
+        vqvae_state = {k.replace('module.', ''): v for k, v in loaded.items()}
+        print(len(vqvae_state)) # 1565
+        print(model.pts_bbox_head.vqvae.load_state_dict(vqvae_state, strict=False))
 
     # 预测occupancy
     model.to(device) # 这行代码 将 model 从 CPU 内存移动到 GPU 显存（通常是 cuda:0）

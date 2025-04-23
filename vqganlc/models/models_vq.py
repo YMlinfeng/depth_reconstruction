@@ -1,3 +1,4 @@
+"""原版VQGAN-LC模型的实现"""
 import torch  # 导入 PyTorch 库，用于张量操作和神经网络构建（Tensor类型：torch.Tensor）
 import torch.nn.functional as F  # 导入常用的神经网络函数，如激活函数、损失函数（例如 F.relu, F.mse_loss 等）
 import importlib  # 导入 importlib 模块，用于动态导入模块
@@ -31,18 +32,6 @@ def instantiate_from_config(config):
     # 使用 get_obj_from_str 获得目标类，并展开参数字典(**params)进行实例化。
     return get_obj_from_str(config["target"])(**config.get("params", dict()))
 
-# ----------------------------------------------------------------------------
-# 模块说明：定义 VQGAN-LC 模型类
-#
-# 该模型主要包含：
-# 1. 编码器（Encoder）：接受输入图像并转换成潜在空间的表示
-# 2. 量化器（Quantizer）：将连续的潜在表示映射到离散的码本嵌入上
-# 3. 解码器（Decoder）：将离散码转换回图像
-# 4. 鉴别器（Discriminator）：用于计算对抗损失，提高图像生成质量
-#
-# 同时包含了 EMA（指数移动平均）机制的实现和自适应权重计算，用于平衡
-# 重构损失、量化损失、感知损失以及对抗损失。
-# ----------------------------------------------------------------------------
 class VQModel(torch.nn.Module):
     def __init__(self,
                  args,  # 参数对象，包含模型训练和结构的配置属性（例如 stage、embed_dim、n_vision_words、quantizer_type 等）
@@ -71,8 +60,6 @@ class VQModel(torch.nn.Module):
                                                 ).apply(weights_init)  # 对鉴别器参数进行权重初始化
         
         embed_dim = args.embed_dim  # 从参数中重新获得嵌入向量维度
-        self.perceptual_loss = LPIPS().eval()  # 初始化 LPIPS 模块，用于计算感知损失，设置为 eval() 模式避免训练
-        self.perceptual_weight = args.rate_p  # 感知损失的权重因子，用于 loss 加权
         self.quantize_type = args.quantizer_type  # 量化器类型，例如 "ema"（指数移动平均）等
 
         print("****Using Quantizer: %s" % (args.quantizer_type))
@@ -244,7 +231,7 @@ class VQModel(torch.nn.Module):
         # 调整 z 的形状：原始 (B, C, H, W) => (B, H, W, C)
         z = rearrange(z, 'b c h w -> b h w c').contiguous()
         # 将 (B, H, W, C) 重塑为 (B*H*W, C) 方便与码本向量比较
-        z_flattened = z.view(-1, self.e_dim)
+        z_flattened = z.view(-1, self.e_dim)  # 形状: (256B, 8)
 
         # 如果使用代码本投影，则将 tok_embeddings.weight 经过投影层映射到 embed_dim
         if self.args.use_cblinear != 0:
@@ -329,51 +316,15 @@ class VQModel(torch.nn.Module):
         #  quant: 量化后的潜在表示，形状 (B, embed_dim, H', W')
         #  qloss: 量化损失（标量）
         #  tk_labels: 量化后对应的码本索引，原始形状为 (B*H'*W',) 或 (B, H', W') 依据 sane_index_shape
-        quant, qloss, [_, _, tk_labels] = self.encode(input)
+        quant, qloss, [_, _, tk_labels] = self.encode(input) #input=(1, 3, 256, 256)，quant=(B, 8, 16, 16)
         
-        # 对量化后的特征进行解码，生成重构图像 dec，shape 应为 (B, 3, H, W)
+        # 对量化后的特征进行解码，生成重构图像 dec，shape 应为 (B, 3, H=256, W=256)
         dec = self.decode(quant)
 
         # 计算重构损失：均值 L1 损失（输入与重构图像的绝对误差的均值）
         rec_loss = torch.mean(torch.abs(input.contiguous() - dec.contiguous()))
-        
-        # 计算感知损失：LPIPS，用于衡量两幅图像在深度特征空间的差异
-        p_loss = torch.mean(self.perceptual_loss(input.contiguous(), dec.contiguous()))
-        
-        if step == 0:  # 生成器更新阶段
-            # 通过鉴别器对生成的图像 dec 进行预测，获取 logits，通常形状为 (B, 1) 或 (B, N)
-            logits_fake = self.discriminator(dec)
-            g_loss = -torch.mean(logits_fake)  # 生成器希望提高鉴别器预测值，所以取负值
 
-            if is_val:
-                # 验证时不进行对抗损失更新，只返回各项损失的加权和
-                loss = rec_loss + self.args.rate_q * qloss + self.perceptual_weight * p_loss + 0 * g_loss
-                return loss, rec_loss, qloss, p_loss, g_loss, tk_labels.view(input.shape[0], -1), dec
-            
-            # 计算自适应权重，根据解码器最后一层的梯度比较生成器损失与重构损失的比例
-            d_weight = self.calculate_adaptive_weight(
-                rec_loss + self.perceptual_weight * p_loss,
-                g_loss,
-                self.args.rate_d,
-                last_layer=self.decoder.conv_out.weight
-            )
-            
-            # 根据迭代步数决定是否启用对抗损失项（例如 disc_start 之后）
-            if data_iter_step > self.args.disc_start:
-                loss = rec_loss + self.args.rate_q * qloss + self.perceptual_weight * p_loss + d_weight * g_loss
-            else:
-                loss = rec_loss + self.args.rate_q * qloss + self.perceptual_weight * p_loss + 0 * g_loss
-
-            return loss, rec_loss, qloss, p_loss, g_loss, tk_labels, dec
-        else:  # 鉴别器更新阶段
-            # 对输入真实图像和生成图像均使用 detach() 防止梯度回传到生成器
-            logits_real = self.discriminator(input.contiguous().detach().clone())
-            logits_fake = self.discriminator(dec.detach().clone())
-            # 计算 hinge 损失，鼓励真实样本输出较高值，生成样本输出较低值
-            d_loss = self.hinge_d_loss(logits_real, logits_fake)
-            loss = d_loss + 0 * (rec_loss + qloss + p_loss)  # 鉴别器更新中只关心 d_loss
-
-            return loss, rec_loss, qloss, p_loss, d_loss, tk_labels, dec
+        return  rec_loss,  dec
 
     def encode(self, input):
         """
@@ -389,12 +340,12 @@ class VQModel(torch.nn.Module):
           emb_loss: 量化损失，标量 Tensor
           info: 其它信息（例如距离矩阵、编码索引等）
         """
-        h = self.encoder(input)  # 编码器输出，形状依 ddconfig 决定，通常为 (B, z_channels, H', W')
-        h = self.quant_conv(h)  # 通过量化卷积映射到嵌入空间，输出形状 (B, embed_dim, H', W')
+        h = self.encoder(input)  # 编码器输出，形状依 ddconfig 决定，通常为 (B, z_channels, H', W')=(B, 256, 16, 16)
+        h = self.quant_conv(h)  # 通过量化卷积映射到嵌入空间，输出形状 (B, embed_dim, H', W')=(B, 8, 16, 16)
         if self.e_dim == 768 and self.args.tuning_codebook != -1:
             # 若 embed_dim 为768，则对特征进行 L2 归一化，归一化后每个特征向量的 L2 范数为 1
             h = h / h.norm(dim=1, keepdim=True)
-        quant, emb_loss, info = self.quantize(h)  # 调用量化函数
+        quant, emb_loss, info = self.quantize(h)  # 调用量化函数 (h=(B, 8, 16, 16)),量化完之后仍然为（B， 8， 16， 16）
         return quant, emb_loss, info
 
     def decode(self, quant, global_c_features=None):

@@ -174,11 +174,8 @@ class MyDatasetOnlyforVAE(Dataset):
                 # 如果深度图为单通道，则扩展最后的维度，使形状变为(H, W, 1)
                 if len(depth_img.shape) == 2:
                     depth_img = np.expand_dims(depth_img, axis=-1)  # 插入一个通道维度
-                else:
-                    # 如果读取的深度图有多个通道，只保留第1个通道
-                    depth_img = depth_img[..., :1]
                 # 将深度图转换为float32，并归一化到[0,1]（假定原始深度图像素范围为[0,255]）
-                depth_img = depth_img.astype(np.float32) / 255.0
+                depth_img = depth_img.astype(np.float32) / 1000.0 #!
                 # 将归一化后的RGB图像和深度图拼接在一起，形成RGB-D图像，通道数从3变为4
                 img_concat = np.concatenate([img_normalized, depth_img], axis=-1)
                 img_normalized = img_concat  # 更新img_normalized，使后续处理得到RGB-D图像

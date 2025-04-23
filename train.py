@@ -147,6 +147,7 @@ def validate_vqvae(args, vqvae, val_loader, model, device, epoch, step):
     return avg_loss
 
 def validate_vae(args, vqvae, val_loader, device, epoch, step):
+    vqvae = vqvae.module if isinstance(vqvae, torch.nn.parallel.DistributedDataParallel) else vqvae
     vqvae.eval()
     total_loss = 0
     total_steps = 0
@@ -273,7 +274,10 @@ def train_vqvae(args, model, vqvae, train_loader, val_loader, device):
             # 3) 计算loss并反向传播
             # =====================
             # recon_loss = F.mse_loss(reconstructed_sdf, voxel)  # 与输入 voxel 做 MSE
-            depths, rgbs = model.module.pts_bbox_head.decode_sdf([voxel, reconstructed_sdf], img_metas)
+            # 如果是 DataParallel/DistributedDataParallel，model.module 存在；否则就用 model 本身
+            core = model.module if hasattr(model, 'module') else model
+            depths, rgbs = core.pts_bbox_head.decode_sdf(
+                [voxel, reconstructed_sdf], img_metas)
             recon_loss = F.l1_loss(depths[0], depths[1]) + F.l1_loss(rgbs[0], rgbs[1])
             total_loss = recon_loss + embed_loss               # 总损失
             
@@ -290,7 +294,7 @@ def train_vqvae(args, model, vqvae, train_loader, val_loader, device):
             if step % args.log_interval == 0:
                 print(f"[Epoch {epoch}/{args.epochs}] Step {step}/{len(train_loader)} "
                       f"ReconLoss: {recon_loss.item():.8f}, EmbedLoss: {embed_loss.item():.4f}, TotalLoss: {total_loss.item():.4f}, "
-                      f"Current LR: {current_lr:.12f}")
+                      f"Current LR: {current_lr:.6f}")
             
             # 中途也可以做一次简单验证
             if step % args.val_interval == 0 and val_loader is not None:
@@ -315,6 +319,7 @@ def train_vqvae(args, model, vqvae, train_loader, val_loader, device):
 
 
 def train_vae(args, vqvae, train_loader, val_loader, device):
+    vqvae = vqvae.module if isinstance(vqvae, torch.nn.parallel.DistributedDataParallel) else vqvae
     optimizer = torch.optim.AdamW(vqvae.parameters(), lr=args.lr, betas=(0.9, 0.999),weight_decay=0.01)
 
     total_steps = len(train_loader) * args.epochs
@@ -366,18 +371,19 @@ def train_vae(args, vqvae, train_loader, val_loader, device):
 
             # reparameterize: 这里采用随机采样
             z = posterior.sample()
-            # print(z.shape) # ([1, 16, 2, 65, 98])
+            # print(z.shape) # ([1, 4, 1, 65, 98])
 
             # 解码
             decode_out = vqvae.decode(z, return_dict=True)
-            recons = decode_out.sample  # [B, 4, 1, h', w'] (按实际网络结构可能会包含pad)
-            # print(recons.shape) # ([1, 4, 1, 520, 784])
+            recons = decode_out.sample  # [B, 4, 3, h', w'] (按实际网络结构可能会包含pad)
+            # print(recons.shape) # ([1, 4, 3, 520, 784])
 
             # =====================
             # 2) 计算loss并反向传播
             # =====================
             #todo 该任务对 Depth 渠道或者多帧时序还有专门的损失方式（例如对 Depth 使用别的指标），也可在此处把 recon_loss 拆分成 RGB 重构损失、Depth 重构损失、以及时域上的一致性损失等等
-            recon_loss = F.mse_loss(recons, imgs)
+            # import pdb; pdb.set_trace()
+            recon_loss = F.mse_loss(recons, imgs) # todo 这里有错误吧，recons的shape是（B，4，1，H，W）而imgs的shape是（B，4，3，H，W），应该都是（B，4，3，H，W）
             # todo VAE 训练中，KL 损失容易出现“塌陷”或“KL 消失”的问题
             total_loss = recon_loss + kl_loss  # 最简单的 VAE 损失: recon_loss + KL
 
@@ -434,10 +440,6 @@ def main():
                         action="store_true",
                         default=False,
                         help="使用基于 ITp 的分布式模式（如 MPI 的 OMPI 环境） if set.")
-    # parser.add_argument("--dist_url",
-    #                     type=str,
-    #                     default="tcp://10.124.2.134:12355",
-    #                     help="用于分布式训练初始化的 URL (例如: tcp://主节点IP:端口).")
     parser.add_argument("--rank",
                         type=int,
                         default=0,
@@ -454,12 +456,10 @@ def main():
                         type=str,
                         default="nccl",
                         help="分布式后端（推荐使用 'nccl'）.")
-    # ==============================
     parser.add_argument("--model", type=str, default="VQModel", help="choices: VAERes2DImgDirectBC, VQModel, Cog3DVAE")
     parser.add_argument("--mode", type=str, default="train", help="choices: train, eval")
     parser.add_argument("--general_mode", type=str, default="vae", help="choices: vae, vqgan")
     # 这里是一些与训练VQ-VAE相关的参数,可随意添加
-    # ==============================
     parser.add_argument("--dataset", type=str, default="MyDatasetOnlyforVoxel", help="Dataset name for logging")
     parser.add_argument("--validate_path", type=str, default='./output/d408_1024', help="12")
     parser.add_argument("--batch_size", type=int, default=16, help="batch size per GPU")
@@ -476,7 +476,6 @@ def main():
     parser.add_argument("--save_end_of_epoch", action='store_false', help="save checkpoint at each epoch end") #flag
     parser.add_argument("--use_scheduler", action='store_false', help="use StepLR scheduler or not")
     parser.add_argument("--max_val_steps", type=int, default=5, help="max batch for val step")
-
     # 以下是模型参数，与VQ-VAE定义对应（示例）
     parser.add_argument("--input_height", type=int, default=518,
                         help="图像输入高度")

@@ -1,4 +1,6 @@
-import torch  # 导入 PyTorch 库，用于张量操作和神经网络构建（Tensor类型：torch.Tensor）
+
+"""vqganlc written by mzj"""
+import torch  
 import torch.nn.functional as F  # 导入常用的神经网络函数，如激活函数、损失函数（例如 F.relu, F.mse_loss 等）
 import importlib  # 导入 importlib 模块，用于动态导入模块
 from einops import rearrange  # 导入 rearrange 函数，可灵活改变张量的形状，例如将 (B, C, H, W) 变为 (B, H, W, C)
@@ -837,16 +839,6 @@ class Encoder(nn.Module):
 
 
 
-
-
-
-
-
-
-
-
-
-
 # ----------------------------------------------------------------------------
 # 模块说明：通过字符串获取对象实例（从动态加载的模块中返回类/函数）
 # 主要用于根据配置文件中的字符串路径动态实例化模块
@@ -1177,10 +1169,6 @@ class VQModel(torch.nn.Module):
     
     def forward(self, input, args, global_input=None, data_iter_step=0, step=0, is_val=False):
         """
-        宏观目的：
-        前向传播函数，根据不同训练阶段和步骤计算以下内容：
-          - 进行完整的 VQGAN 计算：编码->量化->解码，计算重构损失、感知损失、以及对抗损失
-        参数：
           input: 输入图像，Tensor，形状 (B, C, H, W, D) = (B, 4, 60, 100, 20)
           global_input: 全局条件输入（比如用于条件生成，具体用途依任务而定）
           data_iter_step: 当前迭代步数，用于调度鉴别器更新时机
@@ -1193,8 +1181,6 @@ class VQModel(torch.nn.Module):
         #  qloss: 量化损失（标量）
         #  tk_labels: 量化后对应的码本索引，原始形状为 (B*H'*W',) 或 (B, H', W') 依据 sane_index_shape
         quant, qloss, [_, _, tk_labels] = self.encode(input, args) 
-        
-        # 对量化后的特征进行解码，生成重构图像 dec，shape 应为 (B, 3, H, W)
         
         # dec = self.decode(quant) #! 原版解码器尚未实现
 
@@ -1305,7 +1291,7 @@ class VQModel(torch.nn.Module):
             h = self.forward_encoder(input) # h.shape: torch.Size([1, 4, 30, 50, 1])
 
         elif args.encoder_type == 'vqgan_lc': #! 原版编码器尚未实现 #todo
-            h = self.encoder(input)  # 编码器输出，形状依 ddconfig 决定，通常为 (B, z_channels, H', W')
+            h = self.encoder(input)  # 编码器输出，形状依 ddconfig 决定，通常为 (B, mid_channels, H', W')
             h = self.quant_conv(h)  # 通过量化卷积映射到嵌入空间，输出形状 (B, embed_dim, H', W')
             if self.e_dim == 768 and self.args.tuning_codebook != -1:
                 # 若 embed_dim 为768，则对特征进行 L2 归一化，归一化后每个特征向量的 L2 范数为 1
@@ -1349,7 +1335,7 @@ if __name__ == "__main__":
         pass
 
     args = DummyArgs()
-    args.encoder_type = "vqgan"
+    args.encoder_type = "vqgan_lc"
     args.quantizer_type = "default"   # 非 EMA 情况
     args.tuning_codebook = -1         # 随机初始化且可调
     args.n_vision_words = 1000
@@ -1372,11 +1358,11 @@ if __name__ == "__main__":
     model.eval()
 
     # 测试输入：随机生成一个张量，形状 (B, C, H, W, D) = (batch_size, 4, 60, 80, 20)
-    batch_size = 2
+    batch_size = 1
     test_input = torch.rand(batch_size, 4, 60, 100, 20).to(device)
 
     with torch.no_grad():
-        output = model(test_input)
+        output = model(test_input, args)
 
     # 打印输出各部分的形状
     # 输出字典包含：'embed_loss' (量化损失标量)，'logits' (解码后的输出)，'mid' (encoded tensor)
