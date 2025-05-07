@@ -14,6 +14,7 @@ from vqvae.vae_2d_resnet import VAERes2D, VAERes3D, VAERes2DImg, VAERes3DVoxel
 # from model import LSSTPVDAv2
 from vismask.gen_vis_mask import sdf2occ
 import matplotlib.pyplot as plt
+from tools.load_config import load_config
 
 # def constant_init(module, val, bias=0):
 #     if hasattr(module, "weight") and module.weight is not None:
@@ -501,7 +502,7 @@ from modules.image2bev.ViewTransformerLSSVoxel import (
 from modules.render import RaySampler
 from modules.render.render_utils import nerf_models
 from modules.render.render_utils.rays import RayBundle
-from vqvae.vae_2d_resnet import VAERes2DImg, VAERes2DImgDirectBC
+from vqvae.vae_2d_resnet import VAERes2DImg, VAERes2DImgDirectBC,VAERes3DImgDirectBC
 from vqganlc.models.vqgan_lc import VQModel
 
 
@@ -649,8 +650,12 @@ class LSSTPVHead(nn.Module):
             print(f"init Model: {args.model}")
             if args.model == "VAERes2DImgDirectBC":
                 self.vqvae = VAERes2DImgDirectBC(inp_channels=80, out_channels=80, z_channels=4, mid_channels=args.n_vision_words) 
+            elif args.model == "VAERes3DImgDirectBC":
+                self.vqvae = VAERes3DImgDirectBC(args, inp_channels=64, out_channels=64, z_channels=4, mid_channels=args.mid_channels) 
             else:
-                self.vqvae = VQModel(args, inp_channels=80, out_channels=80, z_channels=4, mid_channels=args.n_vision_words) 
+                config = load_config(args.vq_config_path, display=True)
+                self.vqvae = VQModel(args=args, ddconfig=config.model.params.ddconfig)
+                # self.vqvae = VQModel(args, inp_channels=80, out_channels=80, z_channels=4, mid_channels=args.n_vision_words) 
 
 
     def _init_layers(
@@ -788,24 +793,27 @@ class LSSTPVHead(nn.Module):
 
         if self.args.mode != "eval":
             return sdf_preds[-1], outputs[-1], outputs[-1]
-
-        # todo 用vqgan对sdf 进行压缩（编码），压缩后不要进行任何操作，马上解压缩（解码），恢复原来的形状
         
-        # todo --------------------------------------------------------------------
-        #
-        # 说明：
-        # 1. sdf_preds[-1] 的形状为 (B, 4, 60, 100, 20)，重排后通道数为 4*20 = 80，
-        #    与 VAERes2DImg 中设置的 inp_channels 和 out_channels 保持一致（均为80）。
-        # 2. 经过 vqvae 处理后，重构输出保存在字典的 'logits' 字段中，其形状与原输入一致。
+        # if self.args.general_mode == "vqgan" and self.args.mode == "eval":
+        #     print("start compress")
+        #     vqvae_out = self.vqvae(outputs[-1],self.args)  # 调用 VAE 压缩模块
+        #     # compressed_feature = vqvae_out['mid']     # 取出中间的压缩结果
+        #     reconstructed_outputs = vqvae_out['logits']  # 获取解码后的重构结果，其形状为 (B, 64, 60, 100, 20)
+        #     # recon_loss = F.mse_loss(reconstructed_outputs, outputs[0])  # 与输入 voxel feature 做 MSE
+        #     # print(recon_loss)
+        #     outputs[-1] = reconstructed_outputs
+        #     sdf_preds = [self.sdf[-1](outputs[-1])]
+        
         if self.args.general_mode == "vqgan" and self.args.mode == "eval":
             print("start compress")
+            # import pdb; pdb.set_trace()
             vqvae_out = self.vqvae(sdf_preds[-1],self.args)  # 调用 VAE 压缩模块
             # compressed_feature = vqvae_out['mid']     # 取出中间的压缩结果
-            reconstructed_sdf = vqvae_out['logits']  # 获取解码后的重构结果，其形状为 (B, 4, 60, 100, 20)
-            # 使用重构后的 sdf 替换原来的 sdf_preds[-1]，便于后续渲染流程观察重建效果
-            recon_loss = F.mse_loss(reconstructed_sdf, sdf_preds[0])  # 与输入 voxel 做 MSE
-            print(recon_loss)
-            sdf_preds[-1] = reconstructed_sdf
+            reconstructed_sdf_preds = vqvae_out['logits']  # 获取解码后的重构结果，其形状为 (B, 64, 60, 100, 20)
+            # recon_loss = F.mse_loss(reconstructed_outputs, outputs[0])  # 与输入 voxel feature 做 MSE
+            # print(recon_loss)
+            sdf_preds[-1] = reconstructed_sdf_preds
+            # sdf_preds = [self.sdf[-1](outputs[-1])]
 
         # print("start render")
         lidar2img, lidar2cam = [], []
@@ -852,6 +860,9 @@ class LSSTPVHead(nn.Module):
             lidar2cam.append(img_meta["lidar2cam"])
         lidar2img = torch.from_numpy(np.asarray(lidar2img)).to(sdf_preds[0])
         lidar2cam = torch.from_numpy(np.asarray(lidar2cam)).to(sdf_preds[0])
+        # ✅ 保证是 Tensor 列表 → stack → 保留计算图（如果原始是 Tensor）
+        # lidar2img = torch.stack([torch.as_tensor(x, dtype=torch.float32, device=sdf_preds[0].device) for x in lidar2img])
+        # lidar2cam = torch.stack([torch.as_tensor(x, dtype=torch.float32, device=sdf_preds[0].device) for x in lidar2cam])
         # render depth
         rays = self.sample_rays(sdf_preds[0], lidar2cam, lidar2img)
         render_depths, render_rgbs = [], []
@@ -868,7 +879,7 @@ class LSSTPVHead(nn.Module):
                         origins=i_ray_o, directions=i_ray_d, depths=None # i_ray_depth
                     )
 
-                preds_dict = self.render_model(
+                preds_dict = self.render_model( #? 是否打断了计算图
                     ray_bundle, sdf_preds[i][bs_idx].permute(0, 3, 2, 1).contiguous(), points=scaled_points)
 
                 # 点到相机平面的depth

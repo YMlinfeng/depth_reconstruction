@@ -3,24 +3,23 @@ from thop import profile
 import types
 
 # 导入你的模型定义
-from vqvae.vae_2d_resnet import VAERes2DImgDirectBC
+from vqvae.vae_2d_resnet import VAERes3DImgDirectBC, VAERes2DImgDirectBC
 
 # 构造一个模拟的 args 对象
 # 如果你的 args 中除了下面几个参数外还有其他需要用到的属性，
 # 请相应地增加进去，或者从实际使用中复制一个 args 对象。
 args = types.SimpleNamespace(
-    inp_channels=80,
-    out_channels=80,
+    inp_channels=64,
+    out_channels=64,
     mid_channels=1024,
     z_channels=4,
     # 如果模型的 forward 里需要其他属性也加入，比如：
-    input_height=60,
-    input_width=100,
-    # 其他可能需要的属性……
+    input_height=518,
+    input_width=784,
 )
 
 # 实例化模型
-vqvae = VAERes2DImgDirectBC(
+vqvae = VAERes3DImgDirectBC(
     inp_channels=args.inp_channels,
     out_channels=args.out_channels,
     mid_channels=args.mid_channels,
@@ -36,7 +35,7 @@ vqvae.to(device)
 # 注意：这里的输入尺寸需要与你模型 forward 函数中期望的尺寸一致。
 # 根据你的代码训练时传入的 voxel 的形状注释来看，这里假设输入 tensor 的形状为 [B, inp_channels, D, H, W]，
 # 你可以根据实际情况对 D, H, W 做相应调整。
-dummy_input = torch.randn(1, args.inp_channels, 60, 100, 1, device=device)
+dummy_input = torch.randn(1, 64, 60, 100, 20, device=device)
 
 # 调用 thop 的 profile 进行统计
 # 注意，由于你的模型的 forward 定义为接收两个参数（dummy_input 和 args），

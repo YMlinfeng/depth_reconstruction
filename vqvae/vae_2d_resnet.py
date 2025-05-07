@@ -1111,6 +1111,7 @@ class VAERes2DImgDirectBC(nn.Module):
 class VAERes3DImgDirectBC(nn.Module):
     def __init__(
         self,
+        args,
         inp_channels=3,      # 输入图像的通道数，默认RGB图像（3通道）--80
         out_channels=3,      # 输出图像通道数，通常与输入图像通道数一致 --80
         mid_channels=256,    # Encoder的输出通道，用于投射到更高维特征空间 -- 1024
@@ -1131,11 +1132,12 @@ class VAERes3DImgDirectBC(nn.Module):
         self.embedder = nn.Linear(inp_channels, mid_channels)
 
         self.embedder_t = nn.Linear(mid_channels, out_channels)
-        print(mid_channels)
+
         self.vqvae = VectorQuantizer( # * 离散化不仅可以压缩信息，还能够有效约束生成模型的潜在分布
-            n_e=mid_channels * height,      # 这里 n_e 默认为 mid_channels 的值（例如 1024）
+            n_e=args.n_vision_words,      # 这里 n_e 默认为 mid_channels 的值（例如 1024）
             # n_e=512,      # 这里 n_e 默认为 mid_channels 的值（例如 256）
-            e_dim=mid_channels * height,    # e_dim 默认为 z_channels 的值（例如 256）#! 应该必须是相等的
+            # e_dim=mid_channels * height,    # e_dim 默认为 z_channels 的值（例如 256）#! 应该必须是相等的
+            e_dim=args.e_dim,    # e_dim 默认为 z_channels 的值（例如 256）#! 应该必须是相等的
             beta=1., 
             z_channels=z_channels, # 编码器（Encoder）：首先将输入图像编码成一个低维的、隐空间（latent space）的表示。对于每个输入图像，编码器产生的输出特征图的通道数由配置参数 ddconfig["z_channels"] 定义，这里面的表示我们常称为“z”
             use_voxel=True

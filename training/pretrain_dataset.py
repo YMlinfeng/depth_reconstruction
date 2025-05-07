@@ -36,23 +36,7 @@ def get_data_path(relative_path=""):
 
 
 class MyDatasetOnlyforVAE(Dataset):
-
-    """
-    这个类的主要职责是：
-    1. 读取事先准备好的数据文件（pickle 文件中存放了多个帧的数据），其中包含多帧图像及对应的传感器外参、内参信息。
-    2. 通过 __getitem__，一次性返回一个包含多帧（比如4帧）有效数据的样本，包括：
-       - 图像张量 (imgs)，已经完成归一化、减均值除标准差、以及尺寸插值。
-       - 相机和自车坐标系之间的变换矩阵 (ego2imgs, ego2cams, cam_intrinsic)，以及其他元数据 (img_meta)。
-    3. 下游在使用 DataLoader 迭代这个 Dataset 时，就能很方便地把 imgs, img_metas 输入到模型
-    """
-
     def __init__(self, args):
-        # ==============================
-        # 宏观解释：在初始化中，我们需要做的事情：
-        # 1. 设定多帧相关参数 (tem, frames)。
-        # 2. 读取数据源pickle文件，把它加载到 self.data 里。
-        # 3. 定义一些常量，比如图像归一化所需的 mean, std，以及网络的目标输入分辨率 input_shape。
-        # ==============================
         
         # 时间步长：表示在数据中，采样下一个帧的间隔
         self.tem = 1  
@@ -72,6 +56,7 @@ class MyDatasetOnlyforVAE(Dataset):
         
         # 使用的相机视角列表，根据之前的推理代码
         self.views = ['CAM_FRONT', 'CAM_FRONT_LEFT', 'CAM_FRONT_RIGHT']
+        self.concat = args.concat
     
     def __len__(self):
         """
@@ -80,21 +65,6 @@ class MyDatasetOnlyforVAE(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        # ==============================
-        # 宏观解释：在 __getitem__ 中，每次我们需要返回一个“多帧”样本（frames=1），
-        # 保证取到相同scene下的连续帧。若 idx 所指位置不足以取到4帧，则往前回退。
-        # ==============================
-        
-        # 如果无法满足取连续4帧(或者不同帧scene_token不一致)，则往前移一个tem*(frames-1)步
-        # 以保证能在同一个scene里拿到满足frames个数的连续帧
-        # if ((idx + self.tem * (self.frames - 1)) >= len(self)) or \
-        #    (self.data[idx]['scene_token'] != self.data[idx + self.tem * (self.frames - 1)]['scene_token']):
-        #     idx = idx - self.tem * (self.frames - 1)
-
-        # # 确定我们要的4帧的具体索引
-        # index_list = [idx + i * self.tem for i in range(self.frames)]
-        
-        # 当 frames=1 时 (self.frames - 1) = 0，以下判断其实很少会触发调整
         if ((idx + self.tem * (self.frames - 1)) >= len(self)) or \
            (self.data[idx]['scene_token'] != self.data[idx + self.tem * (self.frames - 1)]['scene_token']):
             idx = idx - self.tem * (self.frames - 1)
@@ -112,19 +82,6 @@ class MyDatasetOnlyforVAE(Dataset):
         # 注意：最后我们会把它组织成一个 torch.Tensor 交给DataLoader
         all_imgs = []
         
-        # 用于存储所有帧的投影矩阵、内外参等
-        # 这里我们让它是4个元素的列表，每个元素对应当前帧下的“多相机信息”
-        all_lidar2img = []   # shape: (frames, 3, 4, 4)
-        all_lidar2cam = []   # shape: (frames, 3, 4, 4)
-        all_cam_intrinsic = []  # shape: (frames, 3, 3, 3)
-
-        # ==============================
-        # 初始化一些常量，比如点云范围、体素维度等
-        # 在原推理中，这些信息保存在 img_meta['pc_range']、img_meta['occ_size'] 中
-        # 这里同样保留，以便下游网络使用。
-        # ==============================
-        pc_range = [0., -10., 0., 12., 10., 4.]
-        occ_size = [60, 100, 20]
         
         # 遍历这4帧，在单帧情况下，该循环只跑1次，即 f_idx = idx
         for f_idx in index_list:
@@ -178,7 +135,9 @@ class MyDatasetOnlyforVAE(Dataset):
                 depth_img = depth_img.astype(np.float32) / 1000.0 #!
                 # 将归一化后的RGB图像和深度图拼接在一起，形成RGB-D图像，通道数从3变为4
                 img_concat = np.concatenate([img_normalized, depth_img], axis=-1)
-                img_normalized = img_concat  # 更新img_normalized，使后续处理得到RGB-D图像
+                if self.concat == True:
+                    print("channel concat...")
+                    img_normalized = img_concat  # 更新img_normalized，使后续处理得到RGB-D图像 
                 
                 # 注意：现阶段还未做resize (后面我们用torch的F.interpolate统一裁到 self.input_shape)
                 frame_imgs.append(img_normalized)  # todo shape: (H, W, 4(RGBD))
@@ -218,82 +177,8 @@ class MyDatasetOnlyforVAE(Dataset):
             
             # 保存到all_imgs里
             all_imgs.append(frame_imgs_np)
-            
-            # 保存这帧对应的多个相机变换矩阵
-            all_lidar2img.append(frame_lidar2img)
-            all_lidar2cam.append(frame_lidar2cam)
-            all_cam_intrinsic.append(frame_cam_intrinsic)
-
-        
-        # ! 4 frames × 3 views
-        # # ==============================
-        # # 宏观解释：到这里，我们已经把4帧×3视角的图像，都以 numpy 的形式放进了 all_imgs (list)，
-        # # 并且也记录了每帧对应的外参、内参（处理了 resize）信息。
-        # # 接下来，我们需要：
-        # # 1) 把 all_imgs 转成 torch.Tensor，
-        # # 2) 用 F.interpolate 做统一的尺寸变换到 self.input_shape，
-        # # 3) 把变换后的图像和变换矩阵们打包到 img_metas。
-        # # ==============================
-        
-        # # 先把4帧的图像合并成一个维度大的 numpy 数组
-        # # shape: (frames, 3, H, W, 3)
-        # all_imgs_np = np.stack(all_imgs, axis=0)
-        
-        # # 转成 torch.Tensor，并把通道排列变成 (frames, 3, 3, H, W)
-        # # 其中 3(第二维) 表示3个相机视角，另一个3(第三维)是RGB通道
-        # # 所以最后维度解释为：
-        # #   B = frames (4帧)
-        # #   V = 3 (CAM_FRONT, etc)
-        # #   C = 3 (颜色通道)
-        # #   H, W = 原图像高宽
-        # all_imgs_torch = torch.from_numpy(all_imgs_np).permute(0, 1, 4, 2, 3).float()
-        
-        # # 我们希望插值到 self.input_shape (高=518, 宽=784)
-        # # 注意：all_imgs_torch 当前形状是 (4, 3, 3, H, W)
-        # # 我们可以把前两个维度合并，做一次插值，再拆开。
-        # B, V, C, H, W = all_imgs_torch.shape
-        # all_imgs_torch = all_imgs_torch.reshape(B*V, C, H, W)  # -> (12, 3, H, W)
-        
-        # # 使用 PyTorch 提供的 F.interpolate 来做双线性插值
-        # all_imgs_torch = F.interpolate(
-        #     all_imgs_torch, 
-        #     size=(self.input_shape[0], self.input_shape[1]),  # (H, W)
-        #     mode='bilinear',
-        #     align_corners=False
-        # )
-        
-        # # 再把插值后的张量变回 (4, 3, 3, 518, 784)
-        # all_imgs_torch = all_imgs_torch.reshape(B, V, C, self.input_shape[0], self.input_shape[1])
-        
-        # # ==============================
-        # # 接下来为这个样本组织一个 img_meta，里面可以放您模型需要的各种额外信息，如
-        # # pc_range, occ_size, lidar2img, lidar2cam, cam_intrinsic, etc.
-        # # ==============================
-        
-        # # 我们这里示例：把4帧×3视角的矩阵都放 list 里即可
-        # # 以下只是示例做法——实际中可以视网络需要拆分或拼接
-        # img_meta = dict()
-        # img_meta['pc_range'] = pc_range
-        # img_meta['occ_size'] = occ_size
-        # # 这里存的 lidars2img 是一个 (frames, 3, 4, 4) 的list(实际上是list of list of np.array)
-        # img_meta['lidar2img'] = all_lidar2img
-        # img_meta['lidar2cam'] = all_lidar2cam
-        # img_meta['cam_intrinsic'] = all_cam_intrinsic
-        
-        # # img_shape 如果只需要存最终插值之后的分辨率，就存 [518, 784]
-        # # 如果需要区分帧等，也可以存一个list
-        # img_meta['img_shape'] = [self.input_shape[0], self.input_shape[1], 3]
-        
-        # # ==============================
-        # # 最终返回值：
-        # #   - all_imgs_torch: shape = (4, 3, 3, 518, 784)
-        # #     表示4帧，每帧3个相机视角，每个相机图像是3通道(518x784)
-        # #   - [img_meta]: 将其放入一个list中是因为推理时您示例代码中常用list包装
-        # # ==============================
-        # return all_imgs_torch, [img_meta]
-        #! 4 frames × 3 views
-
-        #! 1 frame 
+ 
+     
         # 此时 all_imgs 的 shape 原始为 (1, 3, H, W, 4)，因为只有 1 帧、3 视角，每张图像为 4 通道(RGB+D)
         all_imgs_np = np.stack(all_imgs, axis=0)  # (frames=1, 3, H, W, 4)
         
@@ -309,6 +194,17 @@ class MyDatasetOnlyforVAE(Dataset):
         
         # 利用 F.interpolate 对空间尺寸进行插值（这里需要将 (channels, temporal, H, W) 看成多个 2D 图像来处理）
         C, T, H, W = all_imgs_torch.shape  # C=4, T=3
+        # Resize 后 shape: (4, 3, H, W)
+
+        # 简单重复，扩展 temporal 维到 17（即第二维扩展为17）
+        if T != 17:
+            repeat_factor = 17 // T
+            remainder = 17 % T
+            repeated = [all_imgs_torch.repeat(1, repeat_factor, 1, 1)]
+            if remainder > 0:
+                repeated.append(all_imgs_torch[:, :remainder])
+            all_imgs_torch = torch.cat(repeated, dim=1)
+
         all_imgs_torch = all_imgs_torch.reshape(C * T, 1, H, W)  # => [12, 1, 1380, 1920]
         all_imgs_torch = F.interpolate( #!必须是(N，C，H，W)
             all_imgs_torch, 
@@ -318,25 +214,10 @@ class MyDatasetOnlyforVAE(Dataset):
         )
         all_imgs_torch = all_imgs_torch.reshape(C, T, self.input_shape[0], self.input_shape[1])  # 恢复 shape: (4, 3, 目标高, 目标宽)
         
-        # 构造 img_meta
-        pc_range = [0., -10., 0., 12., 10., 4.]
-        occ_size = [60, 100, 20]
-        
-        img_meta = dict()
-        img_meta['pc_range'] = pc_range
-        img_meta['occ_size'] = occ_size
-        # 更新后的 img_shape 反映图像为 (高, 宽, 4) ，即包含 RGB 和 depth 信息
-        img_meta['img_shape'] = [(self.input_shape[0], self.input_shape[1], 4)]
-        if self.frames == 1:
-            img_meta['lidar2img'] = all_lidar2img[0]  # (1, 3, 4, 4)
-            img_meta['lidar2cam'] = all_lidar2cam[0]
-            img_meta['cam_intrinsic'] = all_cam_intrinsic[0]
         
         # 最终返回的 tensor 形状为 (channels, temporal, 高, 宽)，即 (4, 3, 目标高, 目标宽)
-        return all_imgs_torch, [img_meta]
+        return all_imgs_torch
 
-        #! 1 frame
-# ==============================
 
 # 宏观解释：Dataset类用于定义数据集的读取、预处理等操作
 # MyDatasetOnlyforVoxel 专门用来生成可供VQVAE训练的输入（voxel）。

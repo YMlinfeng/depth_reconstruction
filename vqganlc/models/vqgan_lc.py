@@ -7,7 +7,7 @@ from einops import rearrange  # 导入 rearrange 函数，可灵活改变张量�
 from torch.nn import Embedding  # 导入 Embedding 层，用于构造词嵌入表（例如码本）
 from vqganlc.models.discriminator import NLayerDiscriminator, weights_init  # 导入鉴别器模型和权重初始化函数
 from vqganlc.models.lpips import LPIPS  # 导入 LPIPS 模块，用于感知相似度计算（衡量高层特征差异）
-from vqganlc.models.encoder_decoder import Encoder, Decoder, Decoder_Cross  # 导入编码器/解码器模块
+from vqganlc.models.encoder_decoder_vq import Encoder, Decoder, Decoder_Cross  # 导入编码器/解码器模块
 """ adopted from: https://github.com/CompVis/taming-transformers/blob/master/taming/modules/diffusionmodules/model.py """
 # pytorch_diffusion + derived encoder decoder
 import torch
@@ -223,7 +223,7 @@ class VAERes3DVoxel(nn.Module):
             ):
         super().__init__()
         self.pre_vq_conv = SamePadConv3d(mid_channels, z_channels, 1)
-        self.encoder_gpt = Encoder(mid_channels, 4, (4, 4, 4), in_channels=mid_channels)  # args.n_hiddens, args.n_res_layers, args.downsample
+        self.encoder_gpt = VQEncoder(mid_channels, 4, (4, 4, 4), in_channels=mid_channels)  # args.n_hiddens, args.n_res_layers, args.downsample
         self.post_vq_conv = SamePadConv3d(z_channels, mid_channels, 1)
         self.decoder_gpt = Decoder(mid_channels, 4, (4, 4, 4), out_channel=mid_channels)
         self.embedder = nn.Linear(inp_channels, mid_channels)
@@ -280,7 +280,7 @@ class VAERes2D(nn.Module):
             ):
         super().__init__()
         self.pre_vq_conv = SamePadConv3d(640, 320, 1)
-        self.encoder_gpt = Encoder(640, 4, (4, 4, 1), in_channels=320)  # args.n_hiddens, args.n_res_layers, args.downsample
+        self.encoder_gpt = VQEncoder(640, 4, (4, 4, 1), in_channels=320)  # args.n_hiddens, args.n_res_layers, args.downsample
         self.post_vq_conv = SamePadConv3d(320, 640, 1)
         self.decoder_gpt = Decoder(640, 4, (4, 4, 1), out_channel=320)
         self.embedder = nn.Linear(inp_channels, out_channels)
@@ -337,7 +337,7 @@ class VAERes3D(nn.Module):
             ):
         super().__init__()
         self.pre_vq_conv = SamePadConv3d(512, 128, 1)
-        self.encoder_gpt = Encoder(512, 4, (4, 4, 4))  # args.n_hiddens, args.n_res_layers, args.downsample
+        self.encoder_gpt = VQEncoder(512, 4, (4, 4, 4))  # args.n_hiddens, args.n_res_layers, args.downsample
         self.post_vq_conv = SamePadConv3d(128, 512, 1)
         self.decoder_gpt = Decoder(512, 4, (4, 4, 4))
         self.embedder = nn.Linear(inp_channels, out_channels)
@@ -731,7 +731,7 @@ class AxialAttention(nn.Module):
         return out
 
 
-class Decoder(nn.Module):
+class VQDecoder(nn.Module):
     def __init__(self, n_hiddens, n_res_layers, upsample, out_channel=128):
         super().__init__()
         self.res_stack = nn.Sequential(
@@ -808,7 +808,7 @@ class SamePadConv3d(nn.Module):
         return self.conv(F.pad(x, self.pad_input))
 
 
-class Encoder(nn.Module):
+class VQEncoder(nn.Module):
     def __init__(self, n_hiddens, n_res_layers, downsample, in_channels=128):
         super().__init__()
         n_times_downsample = np.array([int(math.log2(d)) for d in downsample])
@@ -863,18 +863,7 @@ def instantiate_from_config(config):
     # 使用 get_obj_from_str 获得目标类，并展开参数字典(**params)进行实例化。
     return get_obj_from_str(config["target"])(**config.get("params", dict()))
 
-# ----------------------------------------------------------------------------
-# 模块说明：定义 VQGAN-LC 模型类
-#
-# 该模型主要包含：
-# 1. 编码器（Encoder）：接受输入图像并转换成潜在空间的表示
-# 2. 量化器（Quantizer）：将连续的潜在表示映射到离散的码本嵌入上
-# 3. 解码器（Decoder）：将离散码转换回图像
-# 4. 鉴别器（Discriminator）：用于计算对抗损失，提高图像生成质量
-#
-# 同时包含了 EMA（指数移动平均）机制的实现和自适应权重计算，用于平衡
-# 重构损失、量化损失、感知损失以及对抗损失。
-# ----------------------------------------------------------------------------
+
 class VQModel(torch.nn.Module):
     def __init__(self,
                 args,  # 参数对象，包含模型训练和结构的配置属性（例如 stage、embed_dim、n_vision_words、quantizer_type 等）
@@ -894,15 +883,15 @@ class VQModel(torch.nn.Module):
         super().__init__()
 
         self.pre_vq_conv = SamePadConv3d(mid_channels, z_channels, 1)
-        
+
         # 参数：输入通道 mid_channels，残差层数24，下采样率为 (2,2,1) #通道维度从inp到mid
-        self.encoder_gpt = Encoder(mid_channels, 24, (2, 2, 1), in_channels=mid_channels)
+        self.encoder_gpt = VQEncoder(mid_channels, 24, (2, 2, 1), in_channels=mid_channels)
         
         # post_vq_conv: 用于将经过 VQ-VAE 量化后的 z，再映射回中间表示空间
         self.post_vq_conv = SamePadConv3d(z_channels, mid_channels, 1)
         
         # decoder_gpt: 解码器模块，将中间表示还原，参数与 encoder 对应
-        self.decoder_gpt = Decoder(mid_channels, 24, (2, 2, 1), out_channel=mid_channels)
+        self.decoder_gpt = VQDecoder(mid_channels, 24, (2, 2, 1), out_channel=mid_channels)
         
         self.embedder = nn.Linear(inp_channels, mid_channels)
         
@@ -911,20 +900,11 @@ class VQModel(torch.nn.Module):
         
 
         # self.image_key = image_key  # 保存输入数据的图像键
-        self.args = args  # 保存参数对象
-        
-        # self.encoder = Encoder(**ddconfig)  # 使用 ddconfig 初始化编码器；输入图像 shape: (B, 3, H, W)
-        # self.decoder = Decoder(**ddconfig)  # 使用 ddconfig 初始化解码器；输出图像 shape 应与输入匹配
-        # 初始化鉴别器，输入为 3 通道图像，采用两层卷积（n_layers=2），不使用 actnorm
-        # self.discriminator = NLayerDiscriminator(input_nc=3,
-        #                                          n_layers=2,
-        #                                          use_actnorm=False,
-        #                                          ndf=64
-        #                                         ).apply(weights_init)  # 对鉴别器参数进行权重初始化
+        self.args = args  # 保存参数对象        
+        self.encoder = Encoder(**ddconfig)  # 使用 ddconfig 初始化编码器；输入图像 shape: (B, 3, H, W)
+        self.decoder = Decoder(**ddconfig)  # 使用 ddconfig 初始化解码器；输出图像 shape 应与输入匹配
         
         embed_dim = z_channels  # 从参数中重新获得嵌入向量维度
-        # self.perceptual_loss = LPIPS().eval()  # 初始化 LPIPS 模块，用于计算感知损失，设置为 eval() 模式避免训练
-        # self.perceptual_weight = args.rate_p  # 感知损失的权重因子，用于 loss 加权
         self.quantize_type = args.quantizer_type  # 量化器类型，例如 "ema"（指数移动平均）等
 
         # print("****Using Quantizer: %s" % (args.quantizer_type))
@@ -933,13 +913,12 @@ class VQModel(torch.nn.Module):
         # if ckpt_path is not None:
         #     self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)  # 如果有预训练权重，则加载
         self.image_key = image_key
-        # if colorize_nlabels is not None:
-        #     # 若提供 colorize_nlabels，则生成一个随机的颜色映射矩阵，形状为 (3, colorize_nlabels, 1, 1)
-        #     assert type(colorize_nlabels)==int
-        #     self.register_buffer("colorize", torch.randn(3, colorize_nlabels, 1, 1))
-        # if monitor is not None:
-        #     self.monitor = monitor  # 保存监控变量
-        
+        self.e_dim = embed_dim
+        self.remap = remap
+        self.sane_index_shape = sane_index_shape
+        self.quant_conv = torch.nn.Conv2d(ddconfig["z_channels"], embed_dim, 1)
+        self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
+       
         # 初始化码本（词嵌入），codebook_dim 即码本向量的维度，初始与 embed_dim 相同
         codebook_dim = embed_dim
         if args.tuning_codebook == -1:  # Random：随机初始化且允许调优 #! 实现了这个逻辑
@@ -988,12 +967,6 @@ class VQModel(torch.nn.Module):
         # self.sane_index_shape = sane_index_shape  # 标志是否返回 (B, H, W) 形状的索引
         self.sane_index_shape = sane_index_shape  # 标志是否返回 (B, D, H, W) 形状的索引
         
-        # # 定义量化前的卷积层：将编码器输出的通道数转换到嵌入维度 embed_dim
-        # # 输入: (B, z_channels, H, W) ； 输出: (B, embed_dim, H, W)
-        # self.quant_conv = torch.nn.Conv2d(ddconfig["z_channels"], embed_dim, 1)
-        # # 定义反量化卷积层，将嵌入空间映射回编码器原始的 z_channels
-        # # 输入: (B, embed_dim, H, W) ； 输出: (B, z_channels, H, W)
-        # self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
 
         # 如果需要进一步将码本映射到嵌入空间，可以选择线性（Linear）或 MLP 投影器
         if args.use_cblinear == 1:
@@ -1031,15 +1004,6 @@ class VQModel(torch.nn.Module):
     # 6. encode / decode：分别实现编码器和解码器的操作
     # 7. get_last_layer / decode_code：辅助函数，用于获取解码器末层和根据码本生成图像
     # ----------------------------------------------------------------------------
-
-    def hinge_d_loss(self, logits_real, logits_fake):
-        # 宏观目的：计算鉴别器损失，鼓励真实图像的判别值大于1，生成图像小于-1
-        # logits_real: Tensor，形状通常为 (B, *)，代表真实图像的输出
-        # logits_fake: Tensor，生成图像的输出
-        loss_real = torch.mean(F.relu(1. - logits_real))  # 对真实图像的 hinge 损失，期望 logits_real >= 1
-        loss_fake = torch.mean(F.relu(1. + logits_fake))  # 对生成图像的 hinge 损失，期望 logits_fake <= -1
-        d_loss = 0.5 * (loss_real + loss_fake)  # 平均两个损失作为最终鉴别器损失
-        return d_loss
 
     def calculate_adaptive_weight(self, nll_loss, g_loss, discriminator_weight, last_layer=None):
         # 宏观目的：平衡重构损失 (nll_loss) 与生成器损失 (g_loss) 的权重
@@ -1167,7 +1131,7 @@ class VQModel(torch.nn.Module):
         # 返回：量化后的张量 z_q，量化损失 loss，以及额外信息 (距离矩阵 d, min_encodings, 最终编码索引)
         return z_q, loss, (d, min_encodings, min_encoding_indices)
     
-    def forward(self, input, args, global_input=None, data_iter_step=0, step=0, is_val=False):
+    def forward(self, input, global_input=None, data_iter_step=0, step=0, is_val=False):
         """
           input: 输入图像，Tensor，形状 (B, C, H, W, D) = (B, 4, 60, 100, 20)
           global_input: 全局条件输入（比如用于条件生成，具体用途依任务而定）
@@ -1180,61 +1144,23 @@ class VQModel(torch.nn.Module):
         #  quant: 量化后的潜在表示，形状 (B, embed_dim, H', W')
         #  qloss: 量化损失（标量）
         #  tk_labels: 量化后对应的码本索引，原始形状为 (B*H'*W',) 或 (B, H', W') 依据 sane_index_shape
-        quant, qloss, [_, _, tk_labels] = self.encode(input, args) 
+        quant, qloss, [_, _, tk_labels] = self.encode(input, self.args) 
         
-        # dec = self.decode(quant) #! 原版解码器尚未实现
 
-        # # 计算重构损失：均值 L1 损失（输入与重构图像的绝对误差的均值）
-        # rec_loss = torch.mean(torch.abs(input.contiguous() - dec.contiguous())) 
-        # # 计算感知损失：LPIPS，用于衡量两幅图像在深度特征空间的差异
-        # # p_loss = torch.mean(self.perceptual_loss(input.contiguous(), dec.contiguous()))
-        # p_loss = 0
-
-        output_dict.update({'embed_loss': qloss})
-        mid = quant
-        logits = self.forward_decoder(quant, input.shape)
-        # 输出字典中添加解码后生成的 logits 与中间表示
-        output_dict.update({'logits': logits})
-        output_dict.update({'mid': mid})
-        # import pdb; pdb.set_trace()
+        if self.args.encoder_type == "vqgan":
+            logits = self.forward_decoder(quant, input.shape)
+        elif self.args.encoder_type == "vqgan_lc":
+            logits = self.decode(quant)
+        
+        output_dict.update({
+            'logits': logits,
+            'embed_loss': qloss,
+            'quant': quant,
+            'input': input  # 保持计算图完整
+        })
+        # print("logits.requires_grad =", logits.requires_grad)
         return output_dict
-        # if step == 0:  # 生成器更新阶段
-        #     # 通过鉴别器对生成的图像 dec 进行预测，获取 logits，通常形状为 (B, 1) 或 (B, N)
-        #     logits_fake = self.discriminator(dec)
-        #     g_loss = -torch.mean(logits_fake)  # 生成器希望提高鉴别器预测值，所以取负值
 
-        #     if is_val:
-        #         # 验证时不进行对抗损失更新，只返回各项损失的加权和
-        #         loss = rec_loss + self.args.rate_q * qloss
-        #         return loss, rec_loss, qloss, p_loss, g_loss, tk_labels.view(input.shape[0], -1), dec
-            
-        #     # 计算自适应权重，根据解码器最后一层的梯度比较生成器损失与重构损失的比例
-        #     d_weight = self.calculate_adaptive_weight(
-        #         rec_loss + self.perceptual_weight * p_loss,
-        #         g_loss,
-        #         self.args.rate_d,
-        #         last_layer=self.decoder.conv_out.weight
-        #     )
-            
-        #     # 根据迭代步数决定是否启用对抗损失项（例如 disc_start 之后）
-        #     if data_iter_step > self.args.disc_start:
-        #         loss = rec_loss + self.args.rate_q * qloss + self.perceptual_weight * p_loss + d_weight * g_loss
-        #     else:
-        #         loss = rec_loss + self.args.rate_q * qloss + self.perceptual_weight * p_loss + 0 * g_loss
-
-        #     return loss, rec_loss, qloss, p_loss, g_loss, tk_labels, dec
-        # else:  # 鉴别器更新阶段
-        #     # 对输入真实图像和生成图像均使用 detach() 防止梯度回传到生成器
-        #     logits_real = self.discriminator(input.contiguous().detach().clone())
-        #     logits_fake = self.discriminator(dec.detach().clone())
-        #     # 计算 hinge 损失，鼓励真实样本输出较高值，生成样本输出较低值
-        #     d_loss = self.hinge_d_loss(logits_real, logits_fake)
-        #     loss = d_loss + 0 * (rec_loss + qloss + p_loss)  # 鉴别器更新中只关心 d_loss
-
-        #     return loss, rec_loss, qloss, p_loss, d_loss, tk_labels, dec
-
-
-        
 
     # --------------------------------------------------
     # forward_encoder 方法：完成编码过程，将输入图像 x 映射到中间隐变量空间
@@ -1290,31 +1216,29 @@ class VQModel(torch.nn.Module):
             # 1. 编码：将输入经过 encoder 获取中间表示 h
             h = self.forward_encoder(input) # h.shape: torch.Size([1, 4, 30, 50, 1])
 
-        elif args.encoder_type == 'vqgan_lc': #! 原版编码器尚未实现 #todo
+        elif args.encoder_type == 'vqgan_lc':
+            B, C, H, W, D = input.shape
+            input = input.permute(0, 2, 3, 1, 4)        # 先把轴顺序换成 (B, 60, 100, 4, 20)
+            input = input.reshape(-1, 60, 100, 80)        # 合并 4 和 20 成 80
+            input = input.permute(0, 3, 1, 2)            # 调整回 (B, 80, 60, 100)
             h = self.encoder(input)  # 编码器输出，形状依 ddconfig 决定，通常为 (B, mid_channels, H', W')
-            h = self.quant_conv(h)  # 通过量化卷积映射到嵌入空间，输出形状 (B, embed_dim, H', W')
+            h = self.quant_conv(h)  # 通过量化卷积映射到嵌入空间，输出形状 (B=1, embed_dim=256, H'=3, W'=6)
             if self.e_dim == 768 and self.args.tuning_codebook != -1:
                 # 若 embed_dim 为768，则对特征进行 L2 归一化，归一化后每个特征向量的 L2 范数为 1
                 h = h / h.norm(dim=1, keepdim=True) 
+            h = h.unsqueeze(-1) #(1,4,3,6,1)
         
         quant, emb_loss, info = self.quantize(h)  # 调用量化函数 quant.shape=(B,4,30,50,1)
         return quant, emb_loss, info
 
     def decode(self, quant, global_c_features=None):
-        """
-        宏观目的：
-        将量化后的潜在向量映射回原始图像空间
-        步骤：
-          1. 先通过 post_quant_conv 将嵌入向量映射到编码器对应的通道数
-          2. 再通过解码器还原成图像
-          
-        参数：
-          quant: 量化后的张量，形状 (B, embed_dim, H', W')
-        返回：
-          dec: 解码还原后的图像，形状 (B, 3, H, W)
-        """
+        quant = quant.squeeze(-1)
         quant = self.post_quant_conv(quant)  # 映射回 z_channels，形状: (B, z_channels, H', W')
         dec = self.decoder(quant)  # 解码器还原图像
+
+        dec = dec.permute(0, 2, 3, 1)
+        dec = dec.reshape(-1, 60, 100, 4, 20)
+        dec = dec.permute(0, 3, 1, 2, 4)
         return dec
     
     def get_last_layer(self):
@@ -1324,10 +1248,19 @@ class VQModel(torch.nn.Module):
     def decode_code(self, code_b):
         # 根据给定的码本索引张量 code_b，利用量化层中的 embedding 转换为嵌入向量，再解码为图像
         quant_b = self.quantize.embedding(code_b)
-        dec = self.decode(quant_b)
+        dec = self.decode(quant_b)      
         return dec
     
 
+
+
+import yaml
+from omegaconf import OmegaConf
+def load_config(config_path, display=False):
+  config = OmegaConf.load(config_path)
+  if display:
+    print(yaml.dump(OmegaConf.to_container(config)))
+  return config
 
 if __name__ == "__main__":
     # 定义一个简单的参数类
@@ -1335,31 +1268,33 @@ if __name__ == "__main__":
         pass
 
     args = DummyArgs()
-    args.encoder_type = "vqgan_lc"
+    args.encoder_type = "vqgan"
     args.quantizer_type = "default"   # 非 EMA 情况
     args.tuning_codebook = -1         # 随机初始化且可调
-    args.n_vision_words = 1000
+    args.n_vision_words = 16384
     args.local_embedding_path = ""
     args.use_cblinear = 2
     args.rate_p = 0.0
     args.disc_start = 0
     args.rate_q = 1.0
     args.rate_d = 1.0
-
+    args.vq_config_path = "/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/vqganlc/vqgan_configs/vqganlc_16384.yaml"
     # 设定模型参数：
     # - 输入通道：80
     # - 最终输出通道：80
     # - 中间通道：320
     # - 潜变量通道（z_channels）：4
     # - 嵌入向量维度 embed_dim：4（与 z_channels 相同）
-    model = VQModel(args, inp_channels=80, out_channels=80, mid_channels=320, z_channels=4)
+    # model = VQModel(args, inp_channels=80, out_channels=80, mid_channels=320, z_channels=4)
+    config = load_config(args.vq_config_path, display=True)
+    model = VQModel(args=args, ddconfig=config.model.params.ddconfig)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
     model.eval()
 
     # 测试输入：随机生成一个张量，形状 (B, C, H, W, D) = (batch_size, 4, 60, 80, 20)
     batch_size = 1
-    test_input = torch.rand(batch_size, 4, 60, 100, 20).to(device)
+    test_input = torch.rand(batch_size, 80, 60, 100).to(device)
 
     with torch.no_grad():
         output = model(test_input, args)

@@ -14,7 +14,7 @@ class AutoencoderKLOutput(BaseOutput):
             `DiagonalGaussianDistribution` allows for sampling latents from the distribution.
     """
 
-    latent_dist: "DiagonalGaussianDistribution"  # noqa: F821
+    latent_dist: "DiagonalGaussianDistribution"  # noqa: F821 # 引号 "..." 是一种前向声明（forward reference），告诉 Python 这个类型稍后定义或导入
 
 
 @dataclass

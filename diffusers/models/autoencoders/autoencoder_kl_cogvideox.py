@@ -1,3 +1,18 @@
+# Copyright 2024 The CogVideoX team, Tsinghua University & ZhipuAI and The HuggingFace Team.
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
@@ -90,6 +105,7 @@ class CogVideoXCausalConv3d(nn.Module):
         self.width_pad = width_pad
         self.time_pad = time_pad
         self.time_causal_padding = (width_pad, width_pad, height_pad, height_pad, time_pad, 0)
+        self.const_padding_conv3d = (0, self.width_pad, self.height_pad)
 
         self.temporal_dim = 2
         self.time_kernel_size = time_kernel_size
@@ -102,6 +118,8 @@ class CogVideoXCausalConv3d(nn.Module):
             kernel_size=kernel_size,
             stride=stride,
             dilation=dilation,
+            padding=0 if self.pad_mode == "replicate" else self.const_padding_conv3d,
+            padding_mode="zeros",
         )
 
     def fake_context_parallel_forward(
@@ -122,9 +140,7 @@ class CogVideoXCausalConv3d(nn.Module):
         if self.pad_mode == "replicate":
             conv_cache = None
         else:
-            padding_2d = (self.width_pad, self.width_pad, self.height_pad, self.height_pad)
             conv_cache = inputs[:, :, -self.time_kernel_size + 1 :].clone()
-            inputs = F.pad(inputs, padding_2d, mode="constant", value=0)
 
         output = self.conv(inputs)
         return output, conv_cache
@@ -406,15 +422,8 @@ class CogVideoXDownBlock3D(nn.Module):
             conv_cache_key = f"resnet_{i}"
 
             if torch.is_grad_enabled() and self.gradient_checkpointing:
-
-                def create_custom_forward(module):
-                    def create_forward(*inputs):
-                        return module(*inputs)
-
-                    return create_forward
-
-                hidden_states, new_conv_cache[conv_cache_key] = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(resnet),
+                hidden_states, new_conv_cache[conv_cache_key] = self._gradient_checkpointing_func(
+                    resnet,
                     hidden_states,
                     temb,
                     zq,
@@ -508,15 +517,8 @@ class CogVideoXMidBlock3D(nn.Module):
             conv_cache_key = f"resnet_{i}"
 
             if torch.is_grad_enabled() and self.gradient_checkpointing:
-
-                def create_custom_forward(module):
-                    def create_forward(*inputs):
-                        return module(*inputs)
-
-                    return create_forward
-
-                hidden_states, new_conv_cache[conv_cache_key] = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(resnet), hidden_states, temb, zq, conv_cache.get(conv_cache_key)
+                hidden_states, new_conv_cache[conv_cache_key] = self._gradient_checkpointing_func(
+                    resnet, hidden_states, temb, zq, conv_cache.get(conv_cache_key)
                 )
             else:
                 hidden_states, new_conv_cache[conv_cache_key] = resnet(
@@ -622,15 +624,8 @@ class CogVideoXUpBlock3D(nn.Module):
             conv_cache_key = f"resnet_{i}"
 
             if torch.is_grad_enabled() and self.gradient_checkpointing:
-
-                def create_custom_forward(module):
-                    def create_forward(*inputs):
-                        return module(*inputs)
-
-                    return create_forward
-
-                hidden_states, new_conv_cache[conv_cache_key] = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(resnet),
+                hidden_states, new_conv_cache[conv_cache_key] = self._gradient_checkpointing_func(
+                    resnet,
                     hidden_states,
                     temb,
                     zq,
@@ -682,7 +677,7 @@ class CogVideoXEncoder3D(nn.Module):
             "CogVideoXDownBlock3D",
             "CogVideoXDownBlock3D",
         ),
-        block_out_channels: Tuple[int, ...] = (128, 256, 256, 512),
+        block_out_channels: Tuple[int, ...] = (128, 256, 256, 512), # ... 表示任意数量的 int
         layers_per_block: int = 3,
         act_fn: str = "silu",
         norm_eps: float = 1e-6,
@@ -739,8 +734,6 @@ class CogVideoXEncoder3D(nn.Module):
 
         self.norm_out = nn.GroupNorm(norm_num_groups, block_out_channels[-1], eps=1e-6)
         self.conv_act = nn.SiLU()
-
-
         self.conv_out = CogVideoXCausalConv3d(
             block_out_channels[-1], 2 * out_channels, kernel_size=3, pad_mode=pad_mode
         )
@@ -761,18 +754,11 @@ class CogVideoXEncoder3D(nn.Module):
         hidden_states, new_conv_cache["conv_in"] = self.conv_in(sample, conv_cache=conv_cache.get("conv_in"))
 
         if torch.is_grad_enabled() and self.gradient_checkpointing:
-
-            def create_custom_forward(module):
-                def custom_forward(*inputs):
-                    return module(*inputs)
-
-                return custom_forward
-
             # 1. Down
             for i, down_block in enumerate(self.down_blocks):
                 conv_cache_key = f"down_block_{i}"
-                hidden_states, new_conv_cache[conv_cache_key] = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(down_block),
+                hidden_states, new_conv_cache[conv_cache_key] = self._gradient_checkpointing_func(
+                    down_block,
                     hidden_states,
                     temb,
                     None,
@@ -780,8 +766,8 @@ class CogVideoXEncoder3D(nn.Module):
                 )
 
             # 2. Mid
-            hidden_states, new_conv_cache["mid_block"] = torch.utils.checkpoint.checkpoint(
-                create_custom_forward(self.mid_block),
+            hidden_states, new_conv_cache["mid_block"] = self._gradient_checkpointing_func(
+                self.mid_block,
                 hidden_states,
                 temb,
                 None,
@@ -907,16 +893,6 @@ class CogVideoXDecoder3D(nn.Module):
 
         self.norm_out = CogVideoXSpatialNorm3D(reversed_block_out_channels[-1], in_channels, groups=norm_num_groups)
         self.conv_act = nn.SiLU()
-
-        ## ------------------------------- ###
-        ## NEW: 这里增加一个 用于“时序上采样”的操作
-        ## 单帧 => 3帧，可以使用 3D插值或 3D转置卷积
-        self.temporal_upsample = nn.Upsample(
-            scale_factor=(3, 1, 1),  # 让时间维度 scale=3，H和W不变
-            mode="nearest"  # or "trilinear" / "trilinear", 需要注意是否需要对称padding
-        )
-        ## ------------------------------- ###
-
         self.conv_out = CogVideoXCausalConv3d(
             reversed_block_out_channels[-1], out_channels, kernel_size=3, pad_mode=pad_mode
         )
@@ -937,16 +913,9 @@ class CogVideoXDecoder3D(nn.Module):
         hidden_states, new_conv_cache["conv_in"] = self.conv_in(sample, conv_cache=conv_cache.get("conv_in"))
 
         if torch.is_grad_enabled() and self.gradient_checkpointing:
-
-            def create_custom_forward(module):
-                def custom_forward(*inputs):
-                    return module(*inputs)
-
-                return custom_forward
-
             # 1. Mid
-            hidden_states, new_conv_cache["mid_block"] = torch.utils.checkpoint.checkpoint(
-                create_custom_forward(self.mid_block),
+            hidden_states, new_conv_cache["mid_block"] = self._gradient_checkpointing_func(
+                self.mid_block,
                 hidden_states,
                 temb,
                 sample,
@@ -956,8 +925,8 @@ class CogVideoXDecoder3D(nn.Module):
             # 2. Up
             for i, up_block in enumerate(self.up_blocks):
                 conv_cache_key = f"up_block_{i}"
-                hidden_states, new_conv_cache[conv_cache_key] = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(up_block),
+                hidden_states, new_conv_cache[conv_cache_key] = self._gradient_checkpointing_func(
+                    up_block,
                     hidden_states,
                     temb,
                     sample,
@@ -981,13 +950,6 @@ class CogVideoXDecoder3D(nn.Module):
             hidden_states, sample, conv_cache=conv_cache.get("norm_out")
         )
         hidden_states = self.conv_act(hidden_states)
-        ## ------------------------------- ###
-        ## NEW: 时序上采样, 使 (B, C=?, 1, H, W) => (B, C=?, 3, H, W)
-        ## 在 encoder 时将 N=3 压缩为了 1，那么 decoder 时就需要还原 3
-        ## todo 可以改用其他 3D转置卷积, 只要能把 time_dim 从1扩到3即可
-        if hidden_states.shape[2] == 1:
-            hidden_states = self.temporal_upsample(hidden_states)  # => shape (B, channels, 3, H, W)
-        ## ------------------------------- ###
         hidden_states, new_conv_cache["conv_out"] = self.conv_out(hidden_states, conv_cache=conv_cache.get("conv_out"))
 
         return hidden_states, new_conv_cache
@@ -995,21 +957,37 @@ class CogVideoXDecoder3D(nn.Module):
 
 class AutoencoderKLCogVideoX(ModelMixin, ConfigMixin, FromOriginalModelMixin):
     r"""
-    参数说明：
-        in_channels (int, 可选, 默认 3): 输入图像的通道数（例如 RGB 图像为 3）。
-        out_channels (int,  可选, 默认 3): 输出图像的通道数。
-        down_block_types (Tuple[str], 可选, 默认值为 ("DownEncoderBlock2D",)): 下采样（downsample）模块的类型组成的元组。
-        up_block_types (Tuple[str], 可选, 默认值为 ("UpDecoderBlock2D",)): 上采样（upsample）模块的类型组成的元组。
-        block_out_channels (Tuple[int], 可选, 默认值为 (64,)): 各个模块的输出通道数。
-        act_fn (str, 可选, 默认值为 "silu"): 激活函数（activation function）的种类。
-        sample_size (int, 可选, 默认 32): 输入样本的尺寸大小。
-        scaling_factor (float, 可选, 默认值为 1.15258426): 用于缩放潜在空间均值和方差的比例因子。
-        force_upcast (bool, 可选, 默认 True): 是否强制以 float32 运算（对于高分辨率图像非常重要）。
+    A VAE model with KL loss for encoding images into latents and decoding latent representations into images. Used in
+    [CogVideoX](https://github.com/THUDM/CogVideo).
+
+    This model inherits from [`ModelMixin`]. Check the superclass documentation for it's generic methods implemented
+    for all models (such as downloading or saving).
+
+    Parameters:
+        in_channels (int, *optional*, defaults to 3): Number of channels in the input image.
+        out_channels (int,  *optional*, defaults to 3): Number of channels in the output.
+        down_block_types (`Tuple[str]`, *optional*, defaults to `("DownEncoderBlock2D",)`):
+            Tuple of downsample block types.
+        up_block_types (`Tuple[str]`, *optional*, defaults to `("UpDecoderBlock2D",)`):
+            Tuple of upsample block types.
+        block_out_channels (`Tuple[int]`, *optional*, defaults to `(64,)`):
+            Tuple of block output channels.
+        act_fn (`str`, *optional*, defaults to `"silu"`): The activation function to use.
+        sample_size (`int`, *optional*, defaults to `32`): Sample input size.
+        scaling_factor (`float`, *optional*, defaults to `1.15258426`):
+            The component-wise standard deviation of the trained latent space computed using the first batch of the
+            training set. This is used to scale the latent space to have unit variance when training the diffusion
+            model. The latents are scaled with the formula `z = z * scaling_factor` before being passed to the
+            diffusion model. When decoding, the latents are scaled back to the original scale with the formula: `z = 1
+            / scaling_factor * z`. For more details, refer to sections 4.3.2 and D.1 of the [High-Resolution Image
+            Synthesis with Latent Diffusion Models](https://arxiv.org/abs/2112.10752) paper.
+        force_upcast (`bool`, *optional*, default to `True`):
+            If enabled it will force the VAE to run in float32 for high image resolution pipelines, such as SD-XL. VAE
+            can be fine-tuned / trained to a lower range without loosing too much precision in which case
+            `force_upcast` can be set to `False` - see: https://huggingface.co/madebyollin/sdxl-vae-fp16-fix
     """
 
-    # 开启梯度检查点机制的支持（节省内存的一种方法）
     _supports_gradient_checkpointing = True
-    # 指定不需要拆分的模块名称（在多 GPU 并行训练中可能需要）
     _no_split_modules = ["CogVideoXResnetBlock3D"]
 
     @register_to_config
@@ -1079,7 +1057,6 @@ class AutoencoderKLCogVideoX(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
         # Can be increased to decode more latent frames at once, but comes at a reasonable memory cost and it is not
         # recommended because the temporal parts of the VAE, here, are tricky to understand.
-        # ! 问题所在
         # If you decode X latent frames together, the number of output frames is:
         #     (X + (2 conv cache) + (2 time upscale_1) + (4 time upscale_2) - (2 causal conv downscale)) => X + 6 frames
         #
@@ -1110,10 +1087,6 @@ class AutoencoderKLCogVideoX(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         # and so the tiling implementation has only been tested on those specific resolutions.
         self.tile_overlap_factor_height = 1 / 6
         self.tile_overlap_factor_width = 1 / 5
-
-    def _set_gradient_checkpointing(self, module, value=False):
-        if isinstance(module, (CogVideoXEncoder3D, CogVideoXDecoder3D)):
-            module.gradient_checkpointing = value
 
     def enable_tiling(
         self,
@@ -1202,6 +1175,18 @@ class AutoencoderKLCogVideoX(ModelMixin, ConfigMixin, FromOriginalModelMixin):
     def encode(
         self, x: torch.Tensor, return_dict: bool = True
     ) -> Union[AutoencoderKLOutput, Tuple[DiagonalGaussianDistribution]]:
+        """
+        Encode a batch of images into latents.
+
+        Args:
+            x (`torch.Tensor`): Input batch of images.
+            return_dict (`bool`, *optional*, defaults to `True`):
+                Whether to return a [`~models.autoencoder_kl.AutoencoderKLOutput`] instead of a plain tuple.
+
+        Returns:
+                The latent representations of the encoded videos. If `return_dict` is True, a
+                [`~models.autoencoder_kl.AutoencoderKLOutput`] is returned, otherwise a plain `tuple` is returned.
+        """
         if self.use_slicing and x.shape[0] > 1:
             encoded_slices = [self._encode(x_slice) for x_slice in x.split(1)]
             h = torch.cat(encoded_slices)
@@ -1229,12 +1214,10 @@ class AutoencoderKLCogVideoX(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             remaining_frames = num_frames % frame_batch_size
             start_frame = frame_batch_size * i + (0 if i == 0 else remaining_frames)
             end_frame = frame_batch_size * (i + 1) + remaining_frames
-            z_intermediate = z[:, :, start_frame:end_frame] # # shape (B, latentChannels, 1, h', w')
+            z_intermediate = z[:, :, start_frame:end_frame]
             if self.post_quant_conv is not None:
                 z_intermediate = self.post_quant_conv(z_intermediate)
             z_intermediate, conv_cache = self.decoder(z_intermediate, conv_cache=conv_cache)
-            # 这里说明: decoder里会把 num_frames=1 upscale到N=3
-            # 可能通过TemporalUpSampling或反卷积, 使 z_intermediate => shape (B, out_channels=4, 3, H, W)
             dec.append(z_intermediate)
 
         dec = torch.cat(dec, dim=2)
@@ -1442,14 +1425,13 @@ class AutoencoderKLCogVideoX(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
         return DecoderOutput(sample=dec)
 
-    # 先将输入 sample 编码为潜在分布，再根据 sample_posterior 参数决定是采样（sample）还是取众数（mode），
     # 最后解码生成重构图像/视频。
     def forward(
         self,
         sample: torch.Tensor,  # 输入的图像/视频，形状 [B, C, T, H, W]
         sample_posterior: bool = False,  # 是否从后验分布中采样 latent，布尔值
         return_dict: bool = True,  # 是否返回字典包装的结果
-        generator: Optional[torch.Generator] = None,  # 可选的随机数生成器，用于控制采样的随机性
+        generator: Optional[torch.Generator] = None,  # 可选的随机数生成器，用于控制采样的随机性 类型注解（Type Hints）是 Python 3.5 引入的特性，用于在代码中标明变量和函数参数/返回值的类型，有助于提高代码可读性和使用静态类型检查工具（如 MyPy）进行类型检查
     ) -> Union[torch.Tensor, torch.Tensor]:
         x = sample
         # 将输入通过 encode 方法编码为潜在分布（DiagonalGaussianDistribution）
@@ -1464,5 +1446,7 @@ class AutoencoderKLCogVideoX(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         if not return_dict:
             return (dec,)
         return DecoderOutput(sample=dec)
+
+
 
 

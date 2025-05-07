@@ -57,6 +57,10 @@ def main():
     parser.add_argument("--model", type=str, default="Cog3DVAE", help="choices: VAERes2DImgDirectBC, VQModel, Cog3DVAE")
     parser.add_argument("--mode", type=str, default="eval", help="choices: train, eval")
     parser.add_argument("--general_mode", type=str, default="vae", help="choices: vae, vqgan")
+    parser.add_argument("--vq_config_path", type=str, default="/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/vqganlc/vqgan_configs/vqganlc_16384.yaml", help="11")    
+    parser.add_argument("--e_dim", type=int, default=4, help="11")    
+    parser.add_argument("--mid_channels", type=int, default=1024, help="11")    
+
     args = parser.parse_args()
 
     device = get_device()

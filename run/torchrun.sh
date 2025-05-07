@@ -26,23 +26,23 @@ pip install accelerate
 pip install imageio[ffmpeg]
 
 bash /mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/TORCHRUN train.py \
---validate_path='./output/vaer0' \
+--validate_path='./output/vae_c3' \
 --batch_size=1 \
 --epochs=10 \
 --lr=2e-4 \
 --num_workers=8 \
 --mid_channels=1024 \
---checkpoint_dir="./checkpoints_vae_r0" \
---save_interval=2000 \
---val_interval=4000 \
+--checkpoint_dir="./checkpoints_vae_c3" \
+--save_interval=1000 \
+--val_interval=5000 \
 --n_vision_words=1024 \
 --model="Cog3DVAE" \
 --mode="train" \
 --general_mode="vae" \
 --input_height=520 \
 --input_width=784 \
---inp_channels=4 \
---out_channels=4 \
+--inp_channels=3 \
+--out_channels=3 \
 
 
 
