@@ -32,7 +32,204 @@ import torch.nn.functional as F
 def get_data_path(relative_path=""):
     data_root = "/mnt/bn/occupancy3d/real_world_data/preprocess"
     return os.path.join(data_root, relative_path)
-# ==============================
+
+
+class MyDatasetforVAE_FRONT_1_9(Dataset):
+    """
+    新的数据集用于 fine-tune CogVideox 中用于视频压缩的 3D VAE（只取 FRONT 视角的九张图像构成 1x9 视频）。
+    数据构建方式：
+      - 原始数据集中只有图像数据，每个样本选取 9 个时间步（非连续，帧间隔为 self.tem）；
+      - 每个时间步只选取 FRONT 视角；
+      - 结果构成一个 1x9 的视频样本（图像序列）；
+      - 为防止不同样本过于相似，每两个视频样本之间额外空出一定的时间步（sample_gap_extra）。
+    预处理流程：
+      1. 读取图像（cv2.imread），若图像路径以 "data/" 开头则替换为绝对路径；
+      2. 将 BGR 转 RGB，归一化到 [0,1] 后，再线性映射到 [-1,1]；
+      3. 组织成 shape (C, 9, H, W)，最后利用 F.interpolate 调整到目标分辨率。
+    """
+    def __init__(self, args):
+        super(MyDatasetforVAE_FRONT_1_9, self).__init__()
+        
+        # 帧间隔，每个样本内各时间步之间的间隔
+        self.tem = 5  
+        # 连续时间步数，取 9 个时间步
+        self.frames = 9  
+        # 额外的组间时间步空出数，避免样本间过于相似
+        self.sample_gap_extra = getattr(args, "sample_gap_extra", 20)
+        # 整体组间跨度
+        self.sample_gap = self.frames * self.tem + self.sample_gap_extra
+        
+        # 仅使用 FRONT 视角
+        self.views = ['CAM_FRONT']
+        
+        # 加载原始数据 pkl 文件
+        data_pkl = args.pkl_path
+        with open(data_pkl, 'rb') as f:
+            self.data = pickle.load(f)['infos']
+        
+        # 目标输入的空间尺寸 (高, 宽)
+        self.input_shape = [args.input_height, args.input_width]
+        
+        # 为保证样本取值合法，计算数据集最大起始索引
+        self.max_start_idx = len(self.data) - (self.frames - 1) * self.tem
+    
+    def __len__(self):
+        # 根据组间隔计算样本总数，保证不会越界
+        return (self.max_start_idx) // self.sample_gap
+    
+    def __getitem__(self, idx):
+        # 计算样本的起始索引
+        base_idx = idx * self.sample_gap
+        # 检查是否满足 scene 连续性要求，不满足则向前调整
+        if (base_idx + (self.frames - 1) * self.tem) >= len(self.data) or \
+           (self.data[base_idx]['scene_token'] != self.data[base_idx + (self.frames - 1) * self.tem]['scene_token']):
+            base_idx = max(0, base_idx - self.tem * (self.frames - 1))
+        
+        # 构造 9 个时间步的索引列表（各时间步间隔 self.tem）
+        index_list = [base_idx + i * self.tem for i in range(self.frames)]
+        video_frames = []  # 用于存储每个时间步的 FRONT 视角图像
+        
+        for f_idx in index_list:
+            item_info = self.data[f_idx]
+            # 只取 FRONT 视角
+            view = 'CAM_FRONT'
+            cam_data = item_info['cams'][view]
+            
+            # 读取图像路径，并做路径转换（若以 "data/" 开头则替换为绝对路径）
+            img_path = cam_data['data_path']
+            if img_path.startswith("data/"):
+                img_path = img_path.replace("data", "/mnt/bn/occupancy3d/real_world_data/preprocess", 1)
+                
+            img_bgr = cv2.imread(img_path)
+            if img_bgr is None:
+                raise ValueError(f"Failed to read image: {img_path}")
+            
+            # BGR 转 RGB，并归一化到 [0,1]
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB) / 255.0
+            # 线性映射到 [-1,1]
+            img_normalized = img_rgb * 2.0 - 1.0
+            video_frames.append(img_normalized)
+        
+        # 将 9 帧图像整合成 numpy 数组，shape: (9, H, W, C)
+        video_np = np.stack(video_frames, axis=0)
+        # 变换维度顺序至 (C, 9, H, W)
+        video_np = np.transpose(video_np, (3, 0, 1, 2))
+        video_tensor = torch.from_numpy(video_np).float()
+        
+        # 调整每帧空间尺寸至目标尺寸 (input_height, input_width)
+        C, T, H, W = video_tensor.shape
+        video_tensor = video_tensor.reshape(C * T, 1, H, W)
+        video_tensor = F.interpolate(video_tensor,
+                                     size=(self.input_shape[0], self.input_shape[1]),
+                                     mode='bilinear',
+                                     align_corners=False)
+        video_tensor = video_tensor.reshape(C, T, self.input_shape[0], self.input_shape[1])
+        
+        # 返回的 tensor shape 为 (C, 9, 目标高, 目标宽)
+        return video_tensor
+
+
+class MyDatasetforVAE3_3(Dataset):
+    """
+    新的数据集用于 fine-tune CogVideox 中用于视频压缩的 3D VAE。
+    数据构建方式：
+      - 原始数据集中只有图像数据，每个样本选取 3 个时间步（非连续，帧间隔为 self.tem），
+        每个时间步选取 3 个视角（按"CAM_FRONT_LEFT", "CAM_FRONT", "CAM_FRONT_RIGHT"顺序）；
+      - 组内每个样本构成一个 3x3 共 9 帧的视频；
+      - 为防止不同样本过于相似，每两个视频样本之间额外空出一定的时间步（sample_gap_extra）。
+    预处理流程：
+      1. 读取图像（cv2.imread），若图像路径以 "data/" 开头则替换为绝对路径；
+      2. 将 BGR 转 RGB，归一化到 [0,1] 后，再线性映射到 [-1,1]；
+      3. 组织成 shape (C, 9, H, W)，最后利用 F.interpolate 调整到目标分辨率。
+    """
+    def __init__(self, args):
+        super(MyDatasetforVAE3_3, self).__init__()
+        
+        # 帧间隔：构成一个视频样本中，每个时间步之间的间隔
+        self.tem = 5  
+        # 连续时间步数，选取 3 个时间步来构成一个 3x3 的视频样本
+        self.frames = 3  
+        # 额外的组间时间步空出数，用以确保两个视频样本之间不会过于相近；
+        # 例如设为 10 则每个视频样本所占时间步为 (frames*tem + 10)
+        self.sample_gap_extra = getattr(args, "sample_gap_extra", 20)
+        # 整体的组间间隔（即每个样本的跨度）
+        self.sample_gap = self.frames * self.tem + self.sample_gap_extra
+        
+        # 定义三个视角（按照“左、中、右”顺序）
+        self.views = ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT']
+        
+        # 原始数据 pkl 文件路径
+        # data_pkl = '/mnt/bn/occupancy3d/workspace/lzy/robotics-data-sdk/data_infos/pkls/dcr_data_bottom_static_scaleddepth_240925_sub.pkl'
+        data_pkl = args.pkl_path
+        with open(data_pkl, 'rb') as f:
+            self.data = pickle.load(f)['infos']
+        
+        # 目标输入的空间尺寸 (高, 宽)
+        self.input_shape = [args.input_height, args.input_width]
+        
+        # 为保证样本取值合法，计算数据集最大起始索引
+        self.max_start_idx = len(self.data) - (self.frames - 1) * self.tem
+    
+    def __len__(self):
+        # 根据组间隔计算可采样的视频样本总数
+        # 注意：这里保证每个样本都能取到完整的时间步，且不跨 scene 边界的情况在 __getitem__ 中做检查
+        return (self.max_start_idx) // self.sample_gap
+    
+    def __getitem__(self, idx):
+        # 根据样本 i 计算起始索引
+        base_idx = idx * self.sample_gap
+        # 检查 base_idx 是否满足场景连续性要求，不满足则向前调整
+        if (base_idx + (self.frames - 1) * self.tem) >= len(self.data) or \
+           (self.data[base_idx]['scene_token'] != self.data[base_idx + (self.frames - 1) * self.tem]['scene_token']):
+            # 此处简单调整到前一个合法索引，但需保证 >=0
+            base_idx = max(0, base_idx - self.tem * (self.frames - 1))
+            
+        # 构造 3 个时间步的索引列表：样本内各时间步之间间隔 self.tem
+        index_list = [base_idx + i * self.tem for i in range(self.frames)]
+        
+        video_frames = []  # 用于存储 9 帧图像
+        
+        # 遍历每个时间步，并在每个时间步下依次取出 3 个视角的图像
+        for f_idx in index_list:
+            item_info = self.data[f_idx]
+            for view in self.views:
+                cam_data = item_info['cams'][view]
+                
+                # 读取 RGB 图像
+                img_path = cam_data['data_path']
+                if img_path.startswith("data/"):
+                    img_path = img_path.replace("data", "/mnt/bn/occupancy3d/real_world_data/preprocess", 1)
+                img_bgr = cv2.imread(img_path)
+                if img_bgr is None:
+                    raise ValueError(f"Failed to read image: {img_path}")
+                
+                # 将 BGR 转 RGB，归一化到 [0,1]
+                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB) / 255.0
+                # 线性映射到 [-1,1]：先归一化到[0,1]，再 *2 - 1
+                img_normalized = img_rgb * 2.0 - 1.0  # shape: (H, W, 3)
+                
+                # 如果后续需要加入深度信息，可在此处添加深度图读取处理
+                video_frames.append(img_normalized)
+        
+        # 将 9 帧图像合并成 numpy 数组（形状： (9, H, W, C)）
+        video_np = np.stack(video_frames, axis=0)
+        # 调整维度顺序至 (channels, temporal, H, W)
+        video_np = np.transpose(video_np, (3, 0, 1, 2))
+        
+        video_tensor = torch.from_numpy(video_np).float()
+        
+        # 利用 F.interpolate 调整每一帧的空间尺寸至目标的 (input_height, input_width)
+        C, T, H, W = video_tensor.shape
+        video_tensor = video_tensor.reshape(C * T, 1, H, W)
+        video_tensor = F.interpolate(video_tensor,
+                                     size=(self.input_shape[0], self.input_shape[1]),
+                                     mode='bilinear',
+                                     align_corners=False)
+        video_tensor = video_tensor.reshape(C, T, self.input_shape[0], self.input_shape[1])
+        
+        # 返回的 tensor shape 为 (C, 9, 目标高, 目标宽)
+        return video_tensor
+
 
 
 class MyDatasetOnlyforVAE(Dataset):

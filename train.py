@@ -69,33 +69,62 @@ def save_checkpoint(save_path, epoch, vqvae, optimizer, lr_scheduler):
 
 # load_checkpoint: 在需要断点续训时，从已有的 checkpoint 文件中恢复训练的进度、模型参数、优化器参数等。
 def load_checkpoint(ckpt_path, vqvae, optimizer, lr_scheduler):
-    # 检查 checkpoint 文件是否存在
+    """
+    加载模型训练的 checkpoint，包括模型参数、优化器状态和学习率调度器状态。
+
+    参数:
+        ckpt_path (str): checkpoint 文件路径
+        vqvae (nn.Module): 待加载参数的模型实例
+        optimizer (Optimizer): 优化器实例
+        lr_scheduler (Scheduler): 学习率调度器实例（可为 None）
+
+    返回:
+        int: 加载后训练的起始 epoch
+    """
     if not os.path.isfile(ckpt_path):
-        print(f"=> No checkpoint found at '{ckpt_path}'")
+        print(f"=> ❌ No checkpoint found at '{ckpt_path}'")
         return 1  # 若没有找到 checkpoint 文件，则从第 1 epoch 开始
-    
-    # 加载 checkpoint 字典（这里使用 map_location='cpu' 可保证在不同设备上都能正常加载）
+
     checkpoint = torch.load(ckpt_path, map_location='cpu')
-    start_epoch = checkpoint['epoch'] + 1  # 下一次训练从 checkpoint['epoch'] + 1 开始
+    start_epoch = checkpoint.get('epoch', 0) + 1
 
-    # 获取保存的 state dict
-    state_dict = checkpoint['vqvae_state_dict']
+    # 拿出权重字典
+    state_dict = checkpoint.get('vqvae_state_dict', checkpoint)
 
-    # 判断是否有 "module." 前缀，如果有则去掉这个前缀
-    if any(key.startswith("module.") for key in state_dict.keys()):
-        new_state_dict = {key[len("module."):]: value for key, value in state_dict.items()}
+    # 自动处理 'module.' 前缀匹配问题
+    model_keys = list(vqvae.state_dict().keys())
+    ckpt_keys = list(state_dict.keys())
+
+    if model_keys[0].startswith("module.") and not ckpt_keys[0].startswith("module."):
+        # 模型是 DDP，但 checkpoint 是单卡保存的 → 添加 "module."
+        new_state_dict = {"module." + k: v for k, v in state_dict.items()}
+        print("✅ 加载权重：添加 'module.' 前缀")
+    elif not model_keys[0].startswith("module.") and ckpt_keys[0].startswith("module."):
+        # 模型是单卡，但 checkpoint 是 DDP 保存的 → 去除 "module."
+        new_state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+        print("✅ 加载权重：去除 'module.' 前缀")
     else:
+        # 模型和 checkpoint 保持一致 → 无需改名
         new_state_dict = state_dict
+        print("✅ 加载权重：无需修改前缀")
 
-    # 使用新的 state dict 加载模型参数（严格匹配）
+    # 加载参数
     vqvae.load_state_dict(new_state_dict, strict=True)
+    print(f"=> 🧠 Loaded model weights from '{ckpt_path}'")
 
-    # 加载优化器和 lr 调度器的状态
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    if lr_scheduler and checkpoint['lr_scheduler_state_dict'] is not None:
+    # 加载优化器和调度器状态
+    if 'optimizer_state_dict' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print("✅ Optimizer state loaded.")
+    else:
+        print("⚠️ Warning: Optimizer state not found in checkpoint.")
+
+    if lr_scheduler and checkpoint.get('lr_scheduler_state_dict', None) is not None:
         lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
+        print("✅ LR scheduler state loaded.")
+    else:
+        print("⚠️ Warning: LR scheduler state not found or not used.")
 
-    print(f"=> Loaded checkpoint from '{ckpt_path}', start_epoch {start_epoch}")
     return start_epoch
 
 
@@ -136,8 +165,7 @@ def train_vqvae(args, model, vqvae, train_loader, val_loader, device):
             imgs = imgs.to(device, non_blocking=True)       
             with torch.no_grad():
                 voxel3 = model(imgs, img_metas)  # voxel[0].shape: [B, 4, 60, 100, 20]
-            voxel = voxel3[0]
-
+            voxel = voxel3[1]
             # vqvae_out = vqvae(voxel)
             # logits = vqvae_out['logits']
             # print("logits.is_leaf =", logits.is_leaf)
@@ -182,15 +210,21 @@ def train_vqvae(args, model, vqvae, train_loader, val_loader, device):
             total_loss.backward()
 
 
-            # if step == 1:
-            #     from torchviz import make_dot
-            #     make_dot(total_loss, params=dict(vqvae.named_parameters())).render("graph", format="pdf")
-            #     print("✅ 计算图生成完成，保存在当前目录的 graph.pdf")
+            if step == 1:
+                # from torchviz import make_dot
+                # make_dot(total_loss, params=dict(vqvae.named_parameters())).render("graph", format="pdf")
+                # print("✅ 计算图生成完成，保存在当前目录的 graph.pdf")
+                no_grad_params = []
+                for name, param in vqvae.named_parameters():
+                    if param.requires_grad and param.grad is None:
+                        no_grad_params.append(name)
 
+                if len(no_grad_params) == 0:
+                    print("✅ All parameters have gradients.")
+                else:
+                    for name in no_grad_params:
+                        print(f"[No Grad] {name}")
 
-            for name, param in vqvae.named_parameters():
-                if param.requires_grad and param.grad is None:
-                    print(f"[No Grad] {name}")
             optimizer.step()
             if lr_scheduler:
                 lr_scheduler.step()

@@ -65,43 +65,174 @@
 //     ]
 // }
 
+// {
+//     // vqganlc_16384
+//     "version": "0.2.0",
+//     "configurations": [
+//         {
+//             "name": "Python: Train VQGAN-LC",
+//             "type": "python",
+//             "request": "launch",
+//             "python": "/usr/bin/python3",
+//             "program": "/usr/local/lib/python3.9/dist-packages/torch/distributed/launch.py",
+//             "args": [
+//                 "--nproc-per-node=2",
+//                 "--master-port=12345",
+//                 "--use-env",
+//                 "train.py",
+//                 "--validate_path=./output/vqganlc_16384_2",
+//                 "--batch_size=8",
+//                 "--epochs=10",
+//                 "--lr=2e-4",
+//                 "--num_workers=8",
+//                 "--mid_channels=320",
+//                 "--inp_channels=80",
+//                 "--out_channels=80",
+//                 "--checkpoint_dir=./checkpoints_vqganlc_16384_2",
+//                 "--model=VQModel",
+//                 "--save_interval=10",
+//                 "--val_interval=4000",
+//                 "--n_vision_words=16384",
+//                 "--general_mode=vqgan",
+//                 "--encoder_type=vqgan_lc",
+//                 "--z_channels=4",
+//                 "--vq_config_path=/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/vqganlc/vqgan_configs/vqganlc_16384.yaml",
+//                 "--resume",
+//                 "--resume_ckpt=/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/checkpoints_vqganlc_16384/vqgan_epoch2.pth"
+//             ],
+//             "env": {
+//                 "CUDA_VISIBLE_DEVICES": "0,1"
+//             },
+//             "console": "integratedTerminal"
+//         }
+//     ]
+// }
+
+
+// {
+//     // vqgan_1600_1600_mid1024_2
+//     "version": "0.2.0",
+//     "configurations": [
+//         {
+//             "name": "Python: Train VQGAN",
+//             "type": "python",
+//             "request": "launch",
+//             "python": "/usr/bin/python3",
+//             "program": "/usr/local/lib/python3.9/dist-packages/torch/distributed/launch.py",
+//             "args": [
+//                 "--nproc-per-node=2",
+//                 "--master-port=12345",
+//                 "--use-env",
+//                 "train.py",
+//                 "--validate_path=./output/vqgan_1600_1600_mid1024_test",
+//                 "--batch_size=1",
+//                 "--epochs=10",
+//                 "--lr=2e-4",
+//                 "--num_workers=8",
+//                 "--mid_channels=1024",
+//                 "--inp_channels=64",
+//                 "--out_channels=64",
+//                 "--e_dim=1600",
+//                 "--checkpoint_dir=./checkpoints_vqgan_1600_1600_mid1024_test",
+//                 "--model=VAERes3DImgDirectBC",
+//                 "--save_interval=10000",
+//                 "--val_interval=4000",
+//                 "--n_vision_words=1600",
+//                 "--general_mode=vqgan",
+//                 "--resume",
+//                 "--resume_ckpt=/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/checkpoints_vqgan_1600_1600_mid1024/vqgan_epoch1_step14000.pth"
+//             ],
+//             "env": {
+//                 "CUDA_VISIBLE_DEVICES": "0,1"
+//             }
+//         }
+//     ]
+// }
+
+
+// {
+//     // vqgan_16384_1600_mid1024_2
+//     "version": "0.2.0",
+//     "configurations": [
+//         {
+//             "name": "Python: Train VQGAN",
+//             "type": "python",
+//             "request": "launch",
+//             "python": "/usr/bin/python3",
+//             "program": "/usr/local/lib/python3.9/dist-packages/torch/distributed/launch.py",
+//             "args": [
+//                 "--nproc-per-node=2",
+//                 "--master-port=12345",
+//                 "--use-env",
+//                 "train.py",
+//                 "--validate_path=./output/vqgan_16384_1600_mid1024_test",
+//                 "--batch_size=1",
+//                 "--epochs=10",
+//                 "--lr=2e-4",
+//                 "--num_workers=8",
+//                 "--mid_channels=1024",
+//                 "--inp_channels=64",
+//                 "--out_channels=64",
+//                 "--e_dim=1600",
+//                 "--checkpoint_dir=./checkpoints_vqgan_16384_1600_mid1024_test",
+//                 "--model=VAERes3DImgDirectBC",
+//                 "--save_interval=10000",
+//                 "--val_interval=4000",
+//                 "--n_vision_words=16384",
+//                 "--general_mode=vqgan",
+//                 "--resume",
+//                 "--resume_ckpt=/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/checkpoints_vqgan_16384_1600_mid1024/vqgan_epoch2_step9000.pth"
+//             ],
+//             "env": {
+//                 "CUDA_VISIBLE_DEVICES": "0,1"
+//             }
+//         }
+//     ]
+// }
+
+
 {
-    // vqganlc_16384_multigpu
+    // finetue Cog3DVAE
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python: Current File",
+            "name": "Python: Finetune Cog3DVAE",
             "type": "python",
             "request": "launch",
             "python": "/usr/bin/python3",
-            "program": "/usr/local/lib/python3.9/dist-packages/torch/distributed/launch.py", 
+            "program": "/usr/local/lib/python3.9/dist-packages/torch/distributed/launch.py",
             "args": [
                 "--nproc-per-node=2",
-                "--master-port=12345",  // 👈 避免默认的 29500
+                "--master-port=12345",
                 "--use-env",
-                "train.py",  // 🧠 你的主训练脚本
-                "--validate_path=./output/vqganlc_16384",
-                "--batch_size=4",
+                "finetunevae.py",
+                "--validate_path=./validation/vae_finetune33",
+                "--batch_size=1",
                 "--epochs=10",
                 "--lr=2e-4",
                 "--num_workers=8",
-                "--mid_channels=320",
-                "--inp_channels=80",
-                "--out_channels=80",
-                "--checkpoint_dir=./checkpoints_vqganlc_16384",
-                "--model=VQModel",
-                "--save_interval=10",
-                "--val_interval=4000",
-                "--n_vision_words=16384",
-                "--general_mode=vqgan",
-                "--encoder_type=vqgan_lc",
-                "--z_channels=4",
-                "--vq_config_path=/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/vqganlc/vqgan_configs/vqganlc_16384.yaml"
+                "--mid_channels=1024",
+                "--checkpoint_dir=./checkpoints_vae_finetune33",
+                "--save_interval=20",
+                "--val_interval=20",
+                "--model=Cog3DVAE",
+                "--mode=train",
+                "--input_height=304",
+                "--input_width=456",
+                "--inp_channels=3",
+                "--out_channels=3"
             ],
-            "env": {"CUDA_VISIBLE_DEVICES": "0,1"},
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0,1"
+            },
+            "console": "integratedTerminal"
         }
     ]
 }
+
+
+
+
 
 
 // {
@@ -144,34 +275,3 @@
 // }
 
 
-
-// {
-//     "name": "DDP with torchrun",
-//     "type": "python",
-//     "request": "launch",
-//     "module": "torch.distributed.run",
-//     "args": [
-//       "--nproc_per_node=2",
-//       "train.py",
-//       "--validate_path=./output/vqganlc_16384",
-//       "--batch_size=4",
-//       "--epochs=10",
-//       "--lr=2e-4",
-//       "--num_workers=8",
-//       "--mid_channels=320",
-//       "--inp_channels=80",
-//       "--out_channels=80",
-//       "--checkpoint_dir=./checkpoints_vqganlc_16384",
-//       "--model=VQModel",
-//       "--save_interval=10",
-//       "--val_interval=4000",
-//       "--n_vision_words=16384",
-//       "--general_mode=vqgan",
-//       "--encoder_type=vqgan_lc",
-//       "--z_channels=4",
-//       "--vq_config_path=/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/vqganlc/vqgan_configs/vqganlc_16384.yaml"
-//     ],
-//     "env": {
-//       "CUDA_VISIBLE_DEVICES": "0,1"
-//     }
-//   }

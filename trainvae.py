@@ -24,7 +24,7 @@ from torchvision import transforms
 # ===== 自定义模块 =====
 from vqvae.vae_2d_resnet import VAERes2DImg, VAERes2DImgDirectBC, VectorQuantizer, VAERes3DImgDirectBC
 from vqganlc.models.vqgan_lc import VQModel
-from training.pretrain_dataset import MyDatasetOnlyforVoxel, MyDatasetOnlyforVAE
+from training.pretrain_dataset import MyDatasetOnlyforVoxel, MyDatasetOnlyforVAE, MyDatasetforVAE3_3
 from training.train_arg_parser import get_args_parser
 from model import LSSTPVDAv2OnlyForVoxel, LSSTPVDAv2
 from vismask.gen_vis_mask import sdf2occ
@@ -76,9 +76,9 @@ def load_checkpoint(ckpt_path, vqvae, optimizer, lr_scheduler):
     return start_epoch
 
 
-def train_vae(args, vqvae, train_loader, val_loader, device):
-    vqvae = vqvae.module if isinstance(vqvae, torch.nn.parallel.DistributedDataParallel) else vqvae
-    optimizer = torch.optim.AdamW(vqvae.parameters(), lr=args.lr, betas=(0.9, 0.999),weight_decay=0.01)
+def train_vae(args, vae, train_loader, val_loader, device):
+    vae = vae.module if isinstance(vae, torch.nn.parallel.DistributedDataParallel) else vae
+    optimizer = torch.optim.AdamW(vae.parameters(), lr=args.lr, betas=(0.9, 0.999),weight_decay=0.01)
 
     total_steps = len(train_loader) * args.epochs
     # warmup_steps = int(0.05 * total_steps)  # 5% warmup
@@ -99,9 +99,9 @@ def train_vae(args, vqvae, train_loader, val_loader, device):
     # 尝试加载 checkpoint（若 args.resume 为 True，且在 args.resume_ckpt 中指定了 ckpt 文件路径）
     start_epoch = 1
     if args.resume:
-        start_epoch = load_checkpoint(args.resume_ckpt, vqvae, optimizer, lr_scheduler)
+        start_epoch = load_checkpoint(args.resume_ckpt, vae, optimizer, lr_scheduler)
     
-    vqvae.train()
+    vae.train()
 
     # 主训练循环，从 start_epoch 到 args.epochs，每个epoch遍历一遍 train_loader
     for epoch in range(start_epoch, args.epochs + 1):
@@ -119,7 +119,7 @@ def train_vae(args, vqvae, train_loader, val_loader, device):
             # (2) reparameterize (sampling)
             # (3) decode => 重构输出
             # todo 选择先在此处对 imgs 做零填充(F.pad) 以保证 /8 整除
-            encode_out = vqvae.encode(imgs, return_dict=True) #todo
+            encode_out = vae.encode(imgs, return_dict=True) #todo
             posterior = encode_out.latent_dist
             kl_loss = posterior.kl().mean()  # 标准KL散度损失(相对于N(0,1))
 
@@ -128,7 +128,7 @@ def train_vae(args, vqvae, train_loader, val_loader, device):
             # print(z.shape) # ([1, 4, 1, 65, 98])
 
             # 解码
-            decode_out = vqvae.decode(z, return_dict=True)
+            decode_out = vae.decode(z, return_dict=True)
             recons = decode_out.sample  # [B, 4, 3, h', w'] (按实际网络结构可能会包含pad)
             # print(recons.shape) # ([1, 4, 3, 520, 784])
 
@@ -165,11 +165,11 @@ def train_vae(args, vqvae, train_loader, val_loader, device):
             # 定期保存checkpoint
             if step % args.save_interval == 0:
                 save_path = os.path.join(args.checkpoint_dir, f"vqvae_epoch{epoch}_step{step}.pth")
-                save_checkpoint(save_path, epoch, vqvae, optimizer, lr_scheduler)
+                save_checkpoint(save_path, epoch, vae, optimizer, lr_scheduler)
         
         if args.save_end_of_epoch:
             save_path = os.path.join(args.checkpoint_dir, f"vqvae_epoch{epoch}.pth")
-            save_checkpoint(save_path, epoch, vqvae, optimizer, lr_scheduler)           
+            save_checkpoint(save_path, epoch, vae, optimizer, lr_scheduler)           
     
     print("Training Finished!")
 
@@ -216,7 +216,6 @@ def main():
     parser.add_argument("--save_end_of_epoch", action='store_false', help="save checkpoint at each epoch end") #flag
     parser.add_argument("--use_scheduler", action='store_false', help="use StepLR scheduler or not")
     parser.add_argument("--max_val_steps", type=int, default=5, help="max batch for val step")
-    # 以下是模型参数，与VQ-VAE定义对应（示例）
     parser.add_argument("--input_height", type=int, default=518,
                         help="图像输入高度")
     parser.add_argument("--input_width", type=int, default=784,
@@ -225,7 +224,6 @@ def main():
     parser.add_argument("--out_channels", type=int, default=80, help="输出通道数")
     parser.add_argument("--mid_channels", type=int, default=320, help="隐藏层通道数") # 1024
     parser.add_argument("--z_channels", type=int, default=4, help="潜变量通道数") # 256
-    # vqganlc
     parser.add_argument('--concat', action='store_true', help='...')
 
     args = parser.parse_args()
@@ -240,11 +238,9 @@ def main():
     device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
-    dataset_train = MyDatasetOnlyforVAE(args) 
+    dataset_train = MyDatasetforVAE3_3(args) # todo
     
-    # 获取总进程数
     num_tasks = distributed_mode.get_world_size() # 1
-    # 获取当前进程编号
     global_rank = distributed_mode.get_rank() # 0
     print(f"--------num_tasks:{num_tasks}, global_rank:{global_rank}-----------")
     
@@ -254,6 +250,7 @@ def main():
         rank=global_rank,
         shuffle=True
     )
+    # todo 
     train_loader = DataLoader(
         dataset_train,
         sampler=sampler_train,
@@ -283,32 +280,26 @@ def main():
         )
         logger.info("Initialized a small validation set from training data")
 
-    
-    vqvae_cfg = None  # 如果有额外vqvae的配置，可在此传
-    if args.model == "Cog3DVAE":
-        vqvae = AutoencoderKLCogVideoX(
-            in_channels=args.inp_channels,
-            out_channels=args.out_channels,
-            sample_height=args.input_height,
-            sample_width=args.input_width,
-            latent_channels=4,
-            temporal_compression_ratio=4.0,
-        )
-    else:
-        raise ValueError("未识别的模型类型: " + args.model)
-    
-    vqvae.to(device)
-    print("训练的模型类型为:", args.model)
+    # todo
+    vae = AutoencoderKLCogVideoX(
+        in_channels=args.inp_channels,
+        out_channels=args.out_channels,
+        sample_height=args.input_height,
+        sample_width=args.input_width,
+        latent_channels=4,
+        temporal_compression_ratio=4.0,
+    )
+  
+    vae.to(device)
 
     if distributed_mode.get_world_size() > 1:
-        vqvae = DDP(vqvae, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False) # 根据warning修正
+        vae = DDP(vae, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True) # 根据warning修正
 
-    vqvae_total_params = sum(p.numel() for p in vqvae.parameters())
-    vqvae_trainable_params = sum(p.numel() for p in vqvae.parameters() if p.requires_grad)
-    # print(f"[Model Param Count] LSSTPVDAv2OnlyForVoxel total: {model_total_params}, trainable: {model_trainable_params}")
-    print(f"[Model Param Count] VQ-VAE total: {vqvae_total_params}, trainable: {vqvae_trainable_params}")
+    vae_total_params = sum(p.numel() for p in vae.parameters())
+    vae_trainable_params = sum(p.numel() for p in vae.parameters() if p.requires_grad)
+    print(f"[Model Param Count] VQ-VAE total: {vae_total_params}, trainable: {vae_trainable_params}")
     
-    train_vae(args, vqvae, train_loader, val_loader, device)
+    train_vae(args, vae, train_loader, val_loader, device)
 
     print("Done!")
 

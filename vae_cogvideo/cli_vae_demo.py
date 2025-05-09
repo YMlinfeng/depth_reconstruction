@@ -127,7 +127,7 @@ def create_category2_video(jsonl_file, output_dir, total_frames=34, fps=8, resiz
 # ---------------------------------------------------------
 # 生成类别3视频：依次取时间步0、1、2的左、中、右三个视角图片，总共9个画面
 # ---------------------------------------------------------
-def create_category3_video(jsonl_file, output_dir, fps=8, resize_width=None, resize_height=None):
+def create_category3_video(jsonl_file, output_dir, fps=2, resize_width=None, resize_height=None):
     with open(jsonl_file, 'r') as f:
         lines = f.readlines()
 
@@ -176,11 +176,17 @@ def create_category3_video(jsonl_file, output_dir, fps=8, resize_width=None, res
 # ---------------------------------------------------------
 # 以下函数为 CogVideoX 的编码/解码推理代码
 # ---------------------------------------------------------
-def encode_video(model_path, video_path, dtype, device, resize_width=None, resize_height=None):
+def encode_video(model_path, ckpt_path, video_path, dtype, device, resize_width=None, resize_height=None):
     """
     Loads a pre-trained AutoencoderKLCogVideoX model and encodes the video frames.
     """
-    model = AutoencoderKLCogVideoX.from_pretrained(model_path, torch_dtype=dtype).to(device)
+    # model = AutoencoderKLCogVideoX.from_pretrained(model_path, torch_dtype=dtype).to(device)
+    model = load_model_from_pth(
+        config_path="/mnt/bn/occupancy3d/workspace/mzj/CogVideoX-2b/vae/config.json",
+        ckpt_path=ckpt_path,
+        dtype=dtype, 
+        device=device
+    )
     model.enable_slicing()
     model.enable_tiling()
 
@@ -200,11 +206,17 @@ def encode_video(model_path, video_path, dtype, device, resize_width=None, resiz
     return encoded_frames
 
 
-def decode_video(model_path, encoded_tensor_path, dtype, device):
+def decode_video(model_path, ckpt_path, encoded_tensor_path, dtype, device):
     """
     Loads a pre-trained AutoencoderKLCogVideoX model and decodes the encoded video frames.
     """
-    model = AutoencoderKLCogVideoX.from_pretrained(model_path, torch_dtype=dtype).to(device)
+    # model = AutoencoderKLCogVideoX.from_pretrained(model_path, torch_dtype=dtype).to(device)
+    model = load_model_from_pth(
+        config_path="/mnt/bn/occupancy3d/workspace/mzj/CogVideoX-2b/vae/config.json",
+        ckpt_path=ckpt_path,
+        dtype=dtype, 
+        device=device
+    )
     encoded_frames = torch.load(encoded_tensor_path, map_location=device)
     encoded_frames = encoded_frames.to(device).to(dtype)
     with torch.no_grad():
@@ -230,12 +242,36 @@ def save_video(tensor, output_path, fps):
     # 此处视频的帧经过模型恢复后应为 RGB 格式，因此不需转换
     save_frames_to_folder(video_out, frames, is_bgr=False)
 
+def load_model_from_pth(config_path, ckpt_path, dtype, device):
+    import json
+    with open(config_path, "r") as f:
+        config = json.load(f)
 
+    config.pop("_class_name", None)
+    config.pop("_diffusers_version", None)
+
+    model = AutoencoderKLCogVideoX(**config).to(device).to(dtype)
+
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    if "vqvae_state_dict" in checkpoint:
+        state_dict = checkpoint["vqvae_state_dict"]
+    else:
+        raise ValueError("Checkpoint does not contain 'vqvae_state_dict' key.")
+
+    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+    print(f"Missing keys: {missing_keys}")
+    print(f"Unexpected keys: {unexpected_keys}")
+
+    model.eval()
+
+    return model
 # ---------------------------------------------------------
 # 主函数：对不同模式进行处理
 # ---------------------------------------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="CogVideoX encode/decode demo with video stitching from JSONL data")
+    parser.add_argument("--ckpt_path", type=str, default="/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/checkpoints_vae_finetune/vqvae_epoch1_step50.pth",
+                        help="The path to the CogVideoX model")
     parser.add_argument("--model_path", type=str, default="/mnt/bn/occupancy3d/workspace/mzj/CogVideoX-2b/vae/",
                         help="The path to the CogVideoX model")
     parser.add_argument("--video_path", type=str, default="/mnt/bn/occupancy3d/workspace/mzj/mp_pretrain/ooout/category3.mp4",
@@ -257,8 +293,8 @@ if __name__ == "__main__":
     parser.add_argument("--video_choice", type=str, choices=["front", "frontleft", "frontright", "111"], default="front",
                         help="If --jsonl_file is provided, select which generated video to use for inference")
     # 新增参数：输入视频帧的宽与高
-    parser.add_argument("--input_width", type=int, default=768, help="输入视频帧的宽度")
-    parser.add_argument("--input_height", type=int, default=768, help="输入视频帧的高度")
+    parser.add_argument("--input_width", type=int, default=450, help="输入视频帧的宽度")
+    parser.add_argument("--input_height", type=int, default=300, help="输入视频帧的高度")
     # 新增参数：FPS
     parser.add_argument("--fps", type=int, default=2, help="视频的帧率设置")
 
@@ -325,14 +361,15 @@ if __name__ == "__main__":
         assert args.video_path, "Video path must be provided for encoding in 'both' mode."
         encoded_output = encode_video(
             args.model_path, 
+            args.ckpt_path,
             args.video_path, 
             dtype, 
             device, 
             resize_width=args.input_width, 
-            resize_height=args.input_height
+            resize_height=args.input_height,
         )
         encoded_tensor_path = os.path.join(args.output_path, "encoded.pt")
         torch.save(encoded_output, encoded_tensor_path)
-        decoded_output = decode_video(args.model_path, encoded_tensor_path, dtype, device)
+        decoded_output = decode_video(args.model_path, args.ckpt_path, encoded_tensor_path, dtype, device)
         save_video(decoded_output, args.output_path, fps=args.fps)
         print(f"Finished encoding and decoding the video in 'both' mode.")

@@ -2,7 +2,9 @@ temp
 wandb
 output
 output_dir
+checkpoints_*/
 checkpoints
+validation
 data
 3rd
 visual_dir

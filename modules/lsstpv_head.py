@@ -794,9 +794,10 @@ class LSSTPVHead(nn.Module):
         if self.args.mode != "eval":
             return sdf_preds[-1], outputs[-1], outputs[-1]
         
+        #! 测试vqgan
         # if self.args.general_mode == "vqgan" and self.args.mode == "eval":
         #     print("start compress")
-        #     vqvae_out = self.vqvae(outputs[-1],self.args)  # 调用 VAE 压缩模块
+        #     vqvae_out = self.vqvae(outputs[-1])  # 调用 VAE 压缩模块
         #     # compressed_feature = vqvae_out['mid']     # 取出中间的压缩结果
         #     reconstructed_outputs = vqvae_out['logits']  # 获取解码后的重构结果，其形状为 (B, 64, 60, 100, 20)
         #     # recon_loss = F.mse_loss(reconstructed_outputs, outputs[0])  # 与输入 voxel feature 做 MSE
@@ -804,6 +805,7 @@ class LSSTPVHead(nn.Module):
         #     outputs[-1] = reconstructed_outputs
         #     sdf_preds = [self.sdf[-1](outputs[-1])]
         
+        #! 测试lc
         if self.args.general_mode == "vqgan" and self.args.mode == "eval":
             print("start compress")
             # import pdb; pdb.set_trace()
